@@ -22,9 +22,8 @@ npm link
 ## Prerequisites
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- Python 3.10+ with `mlx-lm` installed (`pip install mlx-lm`)
+- Python 3.10+ (mallex auto-creates a venv and installs `mlx-lm` on first run)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
-- Node.js 18+
 
 ## Usage
 
@@ -57,17 +56,91 @@ Claude Code  →  mallex proxy (localhost:3456)  →  mlx-lm.server (localhost:8
 
 ## Prompt Trimming
 
-Claude Code sends massive system prompts designed for Claude (Opus/Sonnet). Most of this is useless or harmful for small local models — it burns prefill time and confuses the model.
+### The problem
 
-mallex categorizes models by parameter count and trims accordingly:
+Claude Code sends **~24K characters** of prompt overhead with every request — even for "what is 2+2". This prompt is designed for Claude (Opus/Sonnet with 200K context windows), but local models on Apple Silicon need to process every token through prefill before generating a single response token.
 
-| Tier | Params | Max Input Budget | Strategy |
+A 7B model on an M3 Max processes prefill at ~700 tokens/sec. At ~3.5 chars/token, 24K chars = ~6,800 tokens = **~10 seconds** of staring at a spinner before the model starts responding. For a simple question.
+
+### What Claude Code actually sends
+
+Every request includes two layers of overhead:
+
+**System prompt (~15K chars)** — the `system` field:
+- Claude Code identity and Anthropic safety rules
+- Detailed behavioral instructions (over-engineering warnings, reversibility analysis, etc.)
+- Tool usage instructions referencing Claude Code's native tools (Read, Edit, Glob, etc.)
+- Git commit/PR creation workflows with templates
+- Tone/style guidelines
+- Auto-memory system instructions
+- Environment context (working directory, platform, git branch)
+- User's CLAUDE.md / MEMORY.md project instructions
+- Git status snapshot with recent commits
+
+**User message blocks (~9K chars)** — injected as `<system-reminder>` content blocks in the first user message:
+- Startup hook confirmations
+- Skill system meta-instructions (4K chars explaining how to invoke skills)
+- 18 skill definitions (3.3K chars the model can't use — no `/slash-command` system exists locally)
+- Duplicate MEMORY.md content (already in system prompt)
+- The actual user question (16 chars)
+
+Plus **22 tool definitions** as JSON schemas in the `tools` field.
+
+### The solution
+
+mallex trims at two levels, applied during request translation before forwarding to the local model:
+
+**1. System prompt replacement** (`trimSystemPrompt`) — categorizes models by parameter count into tiers, then replaces Claude Code's verbose system prompt with a compact equivalent while preserving what matters:
+
+| Tier | Params | Strategy |
+|---|---|---|
+| Small | ≤8B | Replace entirely with minimal coding assistant prompt. Extract and keep environment info + user's CLAUDE.md instructions. |
+| Medium | 9-32B | Replace with moderate prompt including core coding rules. Keep environment + user instructions. |
+| Large | >32B | Pass through (these models can handle it, though they're slow regardless). |
+
+**2. Message block filtering** (`trimMessages`) — strips Claude Code infrastructure from user message content blocks using pattern matching:
+
+| Priority | What gets stripped | Chars saved | Why |
 |---|---|---|---|
-| Small | ≤8B | ~14K chars (~4K tokens) | Replace system prompt, strip message overhead |
-| Medium | 9-32B | ~7K chars (~2K tokens) | Moderate system prompt, strip message overhead |
-| Large | >32B | ~1.8K chars (~500 tokens) | Keep more context, still strip infrastructure noise |
+| 1 | Skills listing (18 skill descriptions) | ~3,300 | Local model has no skill/slash-command system |
+| 2 | Superpowers meta-instructions | ~4,090 | Instructions for invoking skills that don't exist locally |
+| 3 | Session hook confirmations | ~79 | Infrastructure artifacts with no semantic value |
+| 4 | Duplicate MEMORY.md | ~1,064 | Already preserved in the trimmed system prompt |
+| 5 | Task tool reminders | ~200 | Periodic nudges from Claude Code's task system |
 
-Budgets target ~8s prefill on M3 Max class hardware. On base M1/M2 (no Pro/Max), effective budgets are roughly half.
+Unrecognized `<system-reminder>` blocks are unwrapped (tags stripped, content kept) rather than dropped, so new Claude Code features degrade gracefully.
+
+**3. Tool injection** — Claude Code's 22 JSON tool schemas are dropped entirely. mallex injects its own 6 tools as XML in the system prompt, using a format local models can parse:
+
+```xml
+<tool name="read_file">
+  <description>Read file contents with line numbers</description>
+  <parameter name="file_path" type="string" required="true">Absolute path to the file</parameter>
+</tool>
+```
+
+### Result
+
+For a simple question like "what is 2+2":
+
+| | Before trimming | After trimming |
+|---|---|---|
+| System prompt | ~15K chars | ~500 chars + ~1K tool XML |
+| User messages | ~9K chars | ~16 chars (just the question) |
+| **Total** | **~24K chars (~6,800 tokens)** | **~1.5K chars (~430 tokens)** |
+| **7B prefill time (M3 Max)** | **~10s** | **<1s** |
+
+### Context budgets
+
+Budgets are derived from prefill speed benchmarks, targeting **responsive interaction** (~8s max prefill on M3 Max class hardware, ~3.5 chars/token for mixed code and English):
+
+| Tier | Params | Max Input Budget | Prefill speed (M3 Max, Q4) |
+|---|---|---|---|
+| Small | ≤8B | ~14K chars (~4K tokens) | ~680-760 t/s |
+| Medium | 9-32B | ~7K chars (~2K tokens) | ~150-400 t/s |
+| Large | >32B | ~1.8K chars (~500 tokens) | ~33-63 t/s |
+
+On base M1/M2 (no Pro/Max), effective budgets are roughly half. On M4 Max / Ultra, they can be doubled.
 
 ## Configuration
 
