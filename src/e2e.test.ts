@@ -1,77 +1,107 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
+import http from "node:http";
 import { loadConfig } from "./config.js";
 import { isServerHealthy } from "./server.js";
-import { chatCompletion, type ChatMessage } from "./client.js";
-import { parseToolCalls } from "./parser.js";
-import { executeTool } from "./tools.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { startProxy } from "./proxy.js";
 
-describe("e2e smoke test", { skip: !process.env.MLX_E2E }, () => {
-  let tmpDir: string;
+describe("e2e proxy test", { skip: !process.env.MLX_E2E }, () => {
+  let proxyServer: http.Server;
+  let proxyPort: number;
   let model: string;
-  let port: number;
 
   before(async () => {
     const config = loadConfig();
     model = config.model;
-    port = config.serverPort;
+    const serverPort = config.serverPort;
+    // Use a different port for test proxy to avoid conflicts
+    proxyPort = config.proxyPort + 1000;
 
     if (!model) {
       throw new Error("No model configured in ~/.mallex/config.json — run mallex first");
     }
 
-    const healthy = await isServerHealthy(port);
+    const healthy = await isServerHealthy(serverPort);
     if (!healthy) {
-      throw new Error(`mlx-lm server not running on port ${port} — start it with: mallex`);
+      throw new Error(`mlx-lm server not running on port ${serverPort} — start it first`);
     }
 
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mallex-e2e-"));
-    fs.writeFileSync(path.join(tmpDir, "hello.txt"), "hello from e2e smoke test\n");
+    proxyServer = startProxy({ proxyPort, serverPort, model });
+    // Wait for the server to be listening
+    await new Promise<void>((resolve) => proxyServer.on("listening", resolve));
   });
 
   after(() => {
-    if (tmpDir) fs.rmSync(tmpDir, { recursive: true });
+    if (proxyServer) proxyServer.close();
   });
 
-  it("model produces a tool call that the parser extracts and tool executor runs", async () => {
-    const filePath = path.join(tmpDir, "hello.txt");
-    const systemPrompt = buildSystemPrompt(tmpDir);
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `Read the file ${filePath}` },
-    ];
-
-    // Turn 1: model should produce a read_file tool call
-    const response1 = await chatCompletion(messages, model, port);
-    assert.ok(response1.content.length > 0, "Model returned empty response");
-
-    const parsed1 = parseToolCalls(response1.content);
-    assert.ok(parsed1.toolCalls.length > 0, "Model did not produce any tool calls");
-
-    const toolCall = parsed1.toolCalls[0];
-    assert.strictEqual(toolCall.name, "read_file", `Expected read_file, got ${toolCall.name}`);
-    assert.ok(toolCall.input.file_path, "Tool call missing file_path parameter");
-
-    // Execute the tool
-    messages.push({ role: "assistant", content: response1.content });
-    const toolResult = await executeTool(toolCall.name, toolCall.input);
-    assert.ok(toolResult.includes("hello from e2e smoke test"), "Tool did not read the fixture file correctly");
-
-    messages.push({
-      role: "user",
-      content: `Tool result for ${toolCall.name}:\n${toolResult}`,
+  it("returns valid Anthropic response for a simple message", async () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-5-20250929",
+      max_tokens: 1024,
+      system: "You are a helpful assistant. Respond briefly.",
+      messages: [
+        { role: "user", content: "Say hello in exactly 3 words." },
+      ],
+      stream: false,
     });
 
-    // Turn 2: model should return a final text response
-    const response2 = await chatCompletion(messages, model, port);
-    assert.ok(response2.content.length > 0, "Model returned empty final response");
+    const res = await fetch(`http://localhost:${proxyPort}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
 
-    const parsed2 = parseToolCalls(response2.content);
-    assert.ok(parsed2.text.length > 0 || parsed2.toolCalls.length > 0,
-      "Final response had neither text nor tool calls");
+    assert.strictEqual(res.status, 200);
+    const data = await res.json() as any;
+
+    // Validate Anthropic response shape
+    assert.strictEqual(data.type, "message");
+    assert.strictEqual(data.role, "assistant");
+    assert.ok(data.id.startsWith("msg_local_"));
+    assert.ok(Array.isArray(data.content));
+    assert.ok(data.content.length > 0);
+    assert.ok(["end_turn", "tool_use", "max_tokens"].includes(data.stop_reason));
+    assert.ok(data.content[0].type === "text");
+    assert.ok(typeof data.content[0].text === "string");
+  });
+
+  it("returns valid Anthropic SSE stream for a streaming request", async () => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-5-20250929",
+      max_tokens: 1024,
+      system: "You are a helpful assistant. Respond briefly.",
+      messages: [
+        { role: "user", content: "Say hello in exactly 3 words." },
+      ],
+      stream: true,
+    });
+
+    const res = await fetch(`http://localhost:${proxyPort}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+
+    assert.strictEqual(res.status, 200);
+    assert.ok(res.headers.get("content-type")?.includes("text/event-stream"));
+
+    const text = await res.text();
+    const events = text.split("\n\n").filter(Boolean);
+
+    // Should start with message_start
+    assert.ok(events[0].includes("event: message_start"), "should start with message_start");
+
+    // Should end with message_stop
+    assert.ok(events[events.length - 1].includes("event: message_stop"), "should end with message_stop");
+
+    // Should contain at least one content_block_delta
+    const hasDelta = events.some((e) => e.includes("event: content_block_delta"));
+    assert.ok(hasDelta, "should have content_block_delta events");
+  });
+
+  it("returns 404 for non-messages endpoints", async () => {
+    const res = await fetch(`http://localhost:${proxyPort}/v1/models`);
+    assert.strictEqual(res.status, 404);
   });
 });

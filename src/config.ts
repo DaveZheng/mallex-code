@@ -5,12 +5,14 @@ import os from "node:os";
 export interface MallexConfig {
   model: string;
   serverPort: number;
+  proxyPort: number;
   idleTimeoutMinutes: number;
 }
 
 export const DEFAULT_CONFIG: MallexConfig = {
   model: "",
   serverPort: 8080,
+  proxyPort: 3456,
   idleTimeoutMinutes: 30,
 };
 

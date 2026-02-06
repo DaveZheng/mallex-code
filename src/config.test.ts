@@ -25,6 +25,7 @@ describe("config", () => {
     const custom: MallexConfig = {
       model: "mlx-community/test-model-4bit",
       serverPort: 9090,
+      proxyPort: 4000,
       idleTimeoutMinutes: 60,
     };
     saveConfig(custom, tmpDir);

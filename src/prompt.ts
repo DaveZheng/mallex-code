@@ -1,33 +1,27 @@
-import { TOOL_DEFINITIONS } from "./tools.js";
+import { TOOL_DEFINITIONS, type ToolDefinition } from "./tool-definitions.js";
 
-export function buildSystemPrompt(workingDirectory: string): string {
-  const toolSection = TOOL_DEFINITIONS.map((tool) => {
-    const params = Object.entries(tool.parameters)
-      .map(([name, p]) => `  - ${name} (${p.type}${p.required ? ", required" : ""}): ${p.description}`)
-      .join("\n");
-    return `### ${tool.name}\n${tool.description}\nParameters:\n${params}`;
-  }).join("\n\n");
+/**
+ * Format a single tool definition as XML for injection into the system prompt.
+ */
+function formatToolXml(tool: ToolDefinition): string {
+  const params = Object.entries(tool.parameters)
+    .map(([name, p]) => `  <parameter name="${name}" type="${p.type}" required="${!!p.required}">${p.description}</parameter>`)
+    .join("\n");
+  return `<tool name="${tool.name}">\n  <description>${tool.description}</description>\n${params}\n</tool>`;
+}
 
-  const example = [
-    'User: "Read the file src/index.ts"',
-    "",
-    "Assistant: Let me read that file for you.",
-    "",
-    "<tool_call>",
-    "<function=read_file>",
-    "<parameter=file_path>" + workingDirectory + "/src/index.ts</parameter>",
-    "</function>",
-    "</tool_call>",
-  ].join("\n");
+/**
+ * Build the XML tool definitions block that gets injected into the system prompt.
+ * This teaches the model the tool_call format and lists available tools.
+ */
+export function buildToolInjection(): string {
+  const toolsXml = TOOL_DEFINITIONS.map(formatToolXml).join("\n\n");
 
   return [
-    "You are Mallex Code, a local coding assistant. You help users with software engineering tasks by reading, writing, and editing code files, running shell commands, and searching codebases.",
-    "",
-    `Working directory: ${workingDirectory}`,
     "",
     "## Tools",
     "",
-    "You have access to the following tools. To use a tool, you MUST output a tool_call block in this exact format:",
+    "You have access to the following tools. To use a tool, output a tool_call block in this exact format:",
     "",
     "<tool_call>",
     "<function=tool_name>",
@@ -42,20 +36,16 @@ export function buildSystemPrompt(workingDirectory: string): string {
     "- You may make multiple tool calls in one response.",
     "- After a tool call, wait for the result before continuing.",
     "",
-    "## Example",
-    "",
-    example,
-    "",
-    "## Available Tools",
-    "",
-    toolSection,
-    "",
-    "## Guidelines",
-    "",
-    "- Read files before modifying them.",
-    "- Use absolute file paths.",
-    "- Prefer editing existing files over creating new ones.",
-    "- For bash commands, use the working directory as context.",
-    "- Be concise in your responses.",
+    "<tools>",
+    toolsXml,
+    "</tools>",
   ].join("\n");
+}
+
+/**
+ * Inject tool definitions into a system prompt from Claude Code.
+ * Appends the tool_call format instructions and tool definitions in XML.
+ */
+export function injectToolDefinitions(systemPrompt: string): string {
+  return systemPrompt + "\n" + buildToolInjection();
 }

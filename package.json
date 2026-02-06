@@ -1,10 +1,11 @@
 {
   "name": "mallex-code",
   "version": "0.1.0",
-  "description": "Local-first CLI coding assistant powered by MLX",
+  "description": "Translation proxy that lets Claude Code run against local MLX models on Apple Silicon",
   "type": "module",
   "bin": {
-    "mallex": "./dist/index.js"
+    "mallex": "./dist/index.js",
+    "mallex-proxy": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",

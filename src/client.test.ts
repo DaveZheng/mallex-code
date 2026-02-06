@@ -1,35 +1,39 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { buildRequestBody, parseResponse, type ChatMessage } from "./client.js";
+import type { OpenAIChatRequest, OpenAIChatResponse } from "./client.js";
 
-describe("buildRequestBody", () => {
-  it("builds correct OpenAI chat completions request", () => {
-    const messages: ChatMessage[] = [
-      { role: "system", content: "You are helpful." },
-      { role: "user", content: "Hello" },
-    ];
-    const body = buildRequestBody(messages, "test-model");
-    assert.strictEqual(body.model, "test-model");
+describe("OpenAIChatRequest", () => {
+  it("accepts a well-formed request body", () => {
+    const body: OpenAIChatRequest = {
+      model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
+      messages: [
+        { role: "system", content: "You are helpful." },
+        { role: "user", content: "Hello" },
+      ],
+      max_tokens: 4096,
+      temperature: 0.7,
+      top_p: 0.95,
+    };
+    assert.strictEqual(body.model, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
     assert.strictEqual(body.messages.length, 2);
-    assert.strictEqual(body.messages[0].role, "system");
+    assert.strictEqual(body.stream, undefined);
   });
 });
 
-describe("parseResponse", () => {
-  it("extracts assistant content from OpenAI response", () => {
-    const response = {
+describe("OpenAIChatResponse", () => {
+  it("matches expected mlx-lm.server response shape", () => {
+    const response: OpenAIChatResponse = {
+      id: "chatcmpl-123",
       choices: [
         {
-          message: {
-            role: "assistant",
-            content: "Hello! Let me help.",
-          },
+          message: { role: "assistant", content: "Hello! Let me help." },
           finish_reason: "stop",
+          index: 0,
         },
       ],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     };
-    const result = parseResponse(response);
-    assert.strictEqual(result.content, "Hello! Let me help.");
-    assert.strictEqual(result.finishReason, "stop");
+    assert.strictEqual(response.choices[0].message.content, "Hello! Let me help.");
+    assert.strictEqual(response.choices[0].finish_reason, "stop");
   });
 });

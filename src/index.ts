@@ -2,7 +2,7 @@
 import { loadConfig, saveConfig } from "./config.js";
 import { getDeviceInfo, recommendModel } from "./device.js";
 import { ensureServer, stopServer } from "./server.js";
-import { startRepl } from "./repl.js";
+import { startProxy } from "./proxy.js";
 import readline from "node:readline";
 
 async function main(): Promise<void> {
@@ -42,11 +42,18 @@ async function main(): Promise<void> {
     console.log(`\nModel set to: ${config.model}\n`);
   }
 
-  // Ensure server is running
+  // Ensure mlx-lm.server is running
   await ensureServer(config.model, config.serverPort);
 
-  // Start REPL
-  await startRepl(config.model, config.serverPort);
+  // Start the translation proxy
+  startProxy({
+    proxyPort: config.proxyPort,
+    serverPort: config.serverPort,
+    model: config.model,
+  });
+
+  console.log(`\nTo use with Claude Code:`);
+  console.log(`  ANTHROPIC_BASE_URL=http://localhost:${config.proxyPort} ANTHROPIC_AUTH_TOKEN=local claude`);
 }
 
 main().catch((err) => {
