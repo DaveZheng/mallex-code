@@ -25,12 +25,21 @@ export interface StreamTranslator {
   finish(): string;
 }
 
+/** Markers that indicate the start of a tool call in the stream. */
+const TOOL_CALL_MARKERS = ["<tool_call>", "<function="];
+
 /**
  * Create a streaming translator that converts OpenAI chunks to Anthropic SSE events.
+ *
+ * Text is streamed in real time until a tool call is detected. Once we see
+ * the start of tool call XML, we stop emitting text deltas and buffer the rest.
+ * On finish(), tool calls are parsed from the buffer and emitted as tool_use blocks.
  */
 export function createStreamTranslator(model: string): StreamTranslator {
   const messageId = generateId("msg_local");
   let accumulated = "";
+  let emittedLength = 0; // how many chars of accumulated we've sent as text deltas
+  let toolCallDetected = false;
   let textBlockStarted = false;
   let blockIndex = 0;
   let headerSent = false;
@@ -73,12 +82,47 @@ export function createStreamTranslator(model: string): StreamTranslator {
 
       accumulated += delta;
 
+      // Once we've detected a tool call, suppress all further text
+      if (toolCallDetected) return ensureHeader();
+
+      // Check if the accumulated text now contains a tool call start
+      for (const marker of TOOL_CALL_MARKERS) {
+        const markerPos = accumulated.indexOf(marker);
+        if (markerPos !== -1) {
+          toolCallDetected = true;
+
+          // Emit any text before the marker that we haven't sent yet
+          const unsent = accumulated.slice(emittedLength, markerPos).trimEnd();
+          if (unsent) {
+            let output = ensureHeader();
+            output += ensureTextBlock();
+            output += sseEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "text_delta", text: unsent },
+            });
+            emittedLength = markerPos;
+            return output;
+          }
+          return ensureHeader();
+        }
+      }
+
+      // No tool call detected — stream the new delta as text
+      // But hold back a small buffer in case a marker spans chunks
+      // (e.g., we got "<tool" and next chunk will be "_call>")
+      const safeEnd = accumulated.length - 12; // longest marker is "<tool_call>" = 11 chars
+      if (safeEnd <= emittedLength) return ensureHeader();
+
+      const toEmit = accumulated.slice(emittedLength, safeEnd);
+      emittedLength = safeEnd;
+
       let output = ensureHeader();
       output += ensureTextBlock();
       output += sseEvent("content_block_delta", {
         type: "content_block_delta",
         index: blockIndex,
-        delta: { type: "text_delta", text: delta },
+        delta: { type: "text_delta", text: toEmit },
       });
       return output;
     },
@@ -86,6 +130,19 @@ export function createStreamTranslator(model: string): StreamTranslator {
     finish(): string {
       let output = ensureHeader();
       const parsed = parseToolCalls(accumulated);
+
+      // Emit any remaining non-tool-call text we haven't sent yet
+      if (parsed.text && emittedLength < parsed.text.length) {
+        const remaining = parsed.text.slice(emittedLength);
+        if (remaining) {
+          output += ensureTextBlock();
+          output += sseEvent("content_block_delta", {
+            type: "content_block_delta",
+            index: blockIndex,
+            delta: { type: "text_delta", text: remaining },
+          });
+        }
+      }
 
       // Close text block if we opened one
       if (textBlockStarted) {
@@ -95,10 +152,6 @@ export function createStreamTranslator(model: string): StreamTranslator {
         });
         blockIndex++;
       }
-
-      // If the parsed text differs from accumulated (tool calls were stripped),
-      // and we already streamed the raw text including XML tags, that's OK —
-      // Claude Code will see the tool_use blocks and use those.
 
       // Emit tool_use blocks
       if (parsed.toolCalls.length > 0) {

@@ -10,6 +10,7 @@ export interface OpenAIChatRequest {
   temperature: number;
   top_p: number;
   stream?: boolean;
+  stop?: string[];
 }
 
 export interface OpenAIChatResponse {

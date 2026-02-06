@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { parseToolCalls, type ParsedToolCall } from "./parser.js";
 
 describe("parseToolCalls", () => {
-  it("parses a single tool call", () => {
+  it("parses a single tool call and maps name to Claude Code format", () => {
     const output = `Let me read that file.
 
 <tool_call>
@@ -15,11 +15,11 @@ describe("parseToolCalls", () => {
     const result = parseToolCalls(output);
     assert.strictEqual(result.text, "Let me read that file.");
     assert.strictEqual(result.toolCalls.length, 1);
-    assert.strictEqual(result.toolCalls[0].name, "read_file");
+    assert.strictEqual(result.toolCalls[0].name, "Read");
     assert.deepStrictEqual(result.toolCalls[0].input, { file_path: "/src/main.ts" });
   });
 
-  it("parses multiple parameters", () => {
+  it("parses multiple parameters and maps edit_file to Edit", () => {
     const output = `<tool_call>
 <function=edit_file>
 <parameter=file_path>/src/main.ts</parameter>
@@ -29,7 +29,7 @@ describe("parseToolCalls", () => {
 </tool_call>`;
 
     const result = parseToolCalls(output);
-    assert.strictEqual(result.toolCalls[0].name, "edit_file");
+    assert.strictEqual(result.toolCalls[0].name, "Edit");
     assert.strictEqual(result.toolCalls[0].input.file_path, "/src/main.ts");
     assert.strictEqual(result.toolCalls[0].input.old_string, "const x = 1;");
     assert.strictEqual(result.toolCalls[0].input.new_string, "const x = 2;");
@@ -46,6 +46,7 @@ line three</parameter>
 </tool_call>`;
 
     const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "Write");
     assert.strictEqual(result.toolCalls[0].input.content, "line one\nline two\nline three");
   });
 
@@ -58,7 +59,7 @@ line three</parameter>
 
     const result = parseToolCalls(output);
     assert.strictEqual(result.toolCalls.length, 1);
-    assert.strictEqual(result.toolCalls[0].name, "read_file");
+    assert.strictEqual(result.toolCalls[0].name, "Read");
   });
 
   it("parses multiple tool calls in one response", () => {
@@ -93,7 +94,7 @@ line three</parameter>
 
     const result = parseToolCalls(output);
     assert.strictEqual(result.toolCalls.length, 1);
-    assert.strictEqual(result.toolCalls[0].name, "read_file");
+    assert.strictEqual(result.toolCalls[0].name, "Read");
     assert.strictEqual(result.toolCalls[0].input.file_path, "/src/main.ts");
   });
 
@@ -111,6 +112,81 @@ line three</parameter>
 
     const result = parseToolCalls(output);
     assert.strictEqual(result.toolCalls.length, 1);
-    assert.strictEqual(result.toolCalls[0].name, "read_file");
+    assert.strictEqual(result.toolCalls[0].name, "Read");
+  });
+
+  it("maps bash tool name to Bash", () => {
+    const output = `<tool_call>
+<function=bash>
+<parameter=command>ls -la</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "Bash");
+    assert.strictEqual(result.toolCalls[0].input.command, "ls -la");
+  });
+
+  it("maps grep tool name to Grep", () => {
+    const output = `<tool_call>
+<function=grep>
+<parameter=pattern>TODO</parameter>
+<parameter=path>/src</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "Grep");
+    assert.strictEqual(result.toolCalls[0].input.pattern, "TODO");
+  });
+
+  it("maps glob tool name to Glob", () => {
+    const output = `<tool_call>
+<function=glob>
+<parameter=pattern>**/*.ts</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "Glob");
+  });
+
+  it("handles stop sequence truncation (missing </tool_call>)", () => {
+    // When stop=["</tool_call>"], the model output ends before the closing tag
+    const output = `Let me check.
+
+<tool_call>
+<function=read_file>
+<parameter=file_path>/src/main.ts</parameter>
+</function>
+`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls.length, 1);
+    assert.strictEqual(result.toolCalls[0].name, "Read");
+    assert.strictEqual(result.toolCalls[0].input.file_path, "/src/main.ts");
+  });
+
+  it("handles stop sequence truncation (missing </function> and </tool_call>)", () => {
+    // Extreme truncation — stop sequence fired before </function>
+    const output = `<tool_call>
+<function=bash>
+<parameter=command>echo hello</parameter>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls.length, 1);
+    assert.strictEqual(result.toolCalls[0].name, "Bash");
+    assert.strictEqual(result.toolCalls[0].input.command, "echo hello");
+  });
+
+  it("passes through unknown tool names unchanged", () => {
+    const output = `<tool_call>
+<function=custom_tool>
+<parameter=arg>value</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "custom_tool");
   });
 });
