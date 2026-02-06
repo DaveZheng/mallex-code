@@ -3,7 +3,7 @@ import http from "node:http";
 import { loadConfig, saveConfig } from "./config.js";
 import { getDeviceInfo, recommendModel } from "./device.js";
 import { ensureDependencies, ensureServer, stopServer } from "./server.js";
-import { startProxy } from "./proxy.js";
+import { startProxy, setShuttingDown } from "./proxy.js";
 import { execFileSync, spawn } from "node:child_process";
 import readline from "node:readline";
 import { handleServerShutdown } from "./shutdown-prompt.js";
@@ -11,6 +11,7 @@ import { handleServerShutdown } from "./shutdown-prompt.js";
 let proxyServer: http.Server | undefined;
 
 function cleanupSync(): void {
+  setShuttingDown();
   if (proxyServer) {
     proxyServer.close();
     proxyServer = undefined;

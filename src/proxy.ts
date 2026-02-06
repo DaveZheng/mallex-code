@@ -11,6 +11,7 @@ import { translateRequest, type AnthropicRequest } from "./translate-request.js"
 import { translateResponse } from "./translate-response.js";
 import { chatCompletion, chatCompletionStream } from "./client.js";
 import { createStreamTranslator } from "./translate-stream.js";
+import { isServerHealthy, isOomCrash, startServer, waitForServer } from "./server.js";
 
 function debugLogRequest(anthropicReq: AnthropicRequest): void {
   try {
@@ -22,6 +23,53 @@ function debugLogRequest(anthropicReq: AnthropicRequest): void {
     );
   } catch {
     // Debug logging should never break the proxy
+  }
+}
+
+class OomError extends Error {
+  constructor() {
+    super("mlx-lm server ran out of GPU memory. Free up memory (close other apps, reduce context), then retry your message.");
+    this.name = "OomError";
+  }
+}
+
+let shuttingDown = false;
+export function setShuttingDown(): void { shuttingDown = true; }
+
+function isConnectionError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("econnrefused") ||
+    msg.includes("econnreset") ||
+    msg.includes("network")
+  );
+}
+
+async function withAutoRestart<T>(
+  fn: () => Promise<T>,
+  model: string,
+  serverPort: number,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isConnectionError(err)) throw err;
+    if (shuttingDown) throw err;
+    if (await isServerHealthy(serverPort)) throw err;
+
+    if (isOomCrash()) {
+      console.error("[mallex] mlx-lm server ran out of GPU memory");
+      throw new OomError();
+    }
+
+    console.error("[mallex] mlx-lm server crashed, restarting...");
+    await startServer(model, serverPort);
+    await waitForServer(serverPort);
+    console.error("[mallex] server restarted, retrying request");
+
+    return fn();
   }
 }
 
@@ -64,16 +112,34 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
       const openaiReq = translateRequest(anthropicReq, model);
 
       if (anthropicReq.stream) {
-        await handleStreaming(openaiReq, model, serverPort, res);
+        await withAutoRestart(
+          () => handleStreaming(openaiReq, model, serverPort, res),
+          model,
+          serverPort,
+        );
       } else {
-        await handleNonStreaming(openaiReq, model, serverPort, res);
+        await withAutoRestart(
+          () => handleNonStreaming(openaiReq, model, serverPort, res),
+          model,
+          serverPort,
+        );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal server error";
       if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
+        if (err instanceof OomError) {
+          res.writeHead(400, {
+            "Content-Type": "application/json",
+            "x-should-retry": "false",
+          });
+          res.end(JSON.stringify({ error: { type: "invalid_request_error", message } }));
+        } else {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { type: "server_error", message } }));
+        }
+      } else {
+        res.end();
       }
-      res.end(JSON.stringify({ error: { type: "server_error", message } }));
     }
   });
 

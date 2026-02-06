@@ -132,6 +132,25 @@ export async function ensureServer(model: string, port: number): Promise<void> {
   console.log("Server ready.");
 }
 
+const OOM_PATTERNS = [
+  "out of memory",
+  "memoryerror",
+  "cannot allocate memory",
+  "failed to allocate",
+  "mlock failed",
+];
+
+export function isOomCrash(): boolean {
+  try {
+    const log = fs.readFileSync(LOG_FILE, "utf-8");
+    // Check the last 2KB for OOM indicators
+    const tail = log.slice(-2048).toLowerCase();
+    return OOM_PATTERNS.some((p) => tail.includes(p));
+  } catch {
+    return false;
+  }
+}
+
 export function stopServer(): boolean {
   if (!fs.existsSync(PID_FILE)) return false;
   const pid = parseServerPid(fs.readFileSync(PID_FILE, "utf-8"));
