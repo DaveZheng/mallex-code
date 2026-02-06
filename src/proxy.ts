@@ -23,6 +23,17 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
   const { proxyPort, serverPort, model } = options;
 
   const server = http.createServer(async (req, res) => {
+    // Handle token counting — Claude Code calls this to validate the model
+    if (req.method === "POST" && (req.url === "/v1/messages/count_tokens" || req.url?.startsWith("/v1/messages/count_tokens?"))) {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body);
+      // Return a plausible token count so Claude Code doesn't 404
+      const estimatedTokens = JSON.stringify(parsed.messages ?? []).length / 4;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: Math.ceil(estimatedTokens) }));
+      return;
+    }
+
     // Only handle POST /v1/messages
     if (req.method !== "POST" || req.url !== "/v1/messages") {
       res.writeHead(404, { "Content-Type": "application/json" });
