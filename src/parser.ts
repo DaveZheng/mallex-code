@@ -8,6 +8,44 @@ export interface ParseResult {
   toolCalls: ParsedToolCall[];
 }
 
+/**
+ * Map local tool names to Claude Code tool names.
+ * The local model calls tools by the names in our injected definitions,
+ * but Claude Code expects its own tool names.
+ */
+const TOOL_NAME_MAP: Record<string, string> = {
+  read_file: "Read",
+  write_file: "Write",
+  edit_file: "Edit",
+  bash: "Bash",
+  glob: "Glob",
+  grep: "Grep",
+};
+
+/**
+ * Map local parameter names to Claude Code parameter names where they differ.
+ */
+const PARAM_NAME_MAP: Record<string, Record<string, string>> = {
+  Read: { file_path: "file_path", offset: "offset", limit: "limit" },
+  Write: { file_path: "file_path", content: "content" },
+  Edit: { file_path: "file_path", old_string: "old_string", new_string: "new_string" },
+  Bash: { command: "command" },
+  Glob: { pattern: "pattern", path: "path" },
+  Grep: { pattern: "pattern", path: "path" },
+};
+
+function mapToolCall(name: string, input: Record<string, string>): ParsedToolCall {
+  const mappedName = TOOL_NAME_MAP[name] ?? name;
+  const paramMap = PARAM_NAME_MAP[mappedName];
+  if (!paramMap) return { name: mappedName, input };
+
+  const mappedInput: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    mappedInput[paramMap[key] ?? key] = value;
+  }
+  return { name: mappedName, input: mappedInput };
+}
+
 export function parseToolCalls(output: string): ParseResult {
   const toolCalls: ParsedToolCall[] = [];
 
@@ -25,8 +63,15 @@ export function parseToolCalls(output: string): ParseResult {
   normalized = normalized.replace(new RegExp(sentinel.replace(/\0/g, "\\0"), "g"), "");
 
   // Normalize: handle missing </tool_call> closing tag
-  // Insert </tool_call> after </function> if not already followed by one
+  // Also handles stop sequence cutting off </tool_call> — the model stops
+  // generating at </tool_call> so it may not appear in the output
   normalized = normalized.replace(/<\/function>\s*(?!<\/tool_call>)/g, "</function>\n</tool_call>");
+
+  // Handle truncated tool calls where </function> is also missing
+  // (stop sequence fired mid-generation). Close any unclosed function blocks.
+  if (normalized.includes("<function=") && !normalized.includes("</function>")) {
+    normalized += "\n</function>\n</tool_call>";
+  }
 
   // Extract all tool call blocks
   const blockRegex = /<tool_call>\s*<function=([^>]+)>([\s\S]*?)<\/function>\s*<\/tool_call>/g;
@@ -52,7 +97,7 @@ export function parseToolCalls(output: string): ParseResult {
       input[paramMatch[1].trim()] = paramMatch[2].trim();
     }
 
-    toolCalls.push({ name, input });
+    toolCalls.push(mapToolCall(name, input));
   }
 
   const text = textParts.join("").trim();

@@ -118,5 +118,6 @@ export function translateRequest(req: AnthropicRequest, mlxModel: string): OpenA
     temperature: 0.7,
     top_p: 0.95,
     stream: req.stream,
+    stop: ["</tool_call>"],
   };
 }
