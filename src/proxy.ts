@@ -17,9 +17,9 @@ export interface ProxyOptions {
 
 /**
  * Start the translation proxy server.
- * Returns the HTTP server instance (for testing/lifecycle management).
+ * Returns a promise that resolves with the HTTP server once it's listening.
  */
-export function startProxy(options: ProxyOptions): http.Server {
+export function startProxy(options: ProxyOptions): Promise<http.Server> {
   const { proxyPort, serverPort, model } = options;
 
   const server = http.createServer(async (req, res) => {
@@ -49,13 +49,15 @@ export function startProxy(options: ProxyOptions): http.Server {
     }
   });
 
-  server.listen(proxyPort, () => {
-    console.log(`mallex-proxy listening on http://localhost:${proxyPort}`);
-    console.log(`  forwarding to mlx-lm.server on port ${serverPort}`);
-    console.log(`  model: ${model}`);
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(proxyPort, () => {
+      console.log(`mallex-proxy listening on http://localhost:${proxyPort}`);
+      console.log(`  forwarding to mlx-lm.server on port ${serverPort}`);
+      console.log(`  model: ${model}`);
+      resolve(server);
+    });
   });
-
-  return server;
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {

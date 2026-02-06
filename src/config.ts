@@ -13,7 +13,7 @@ export const DEFAULT_CONFIG: MallexConfig = {
   model: "",
   serverPort: 8080,
   proxyPort: 3456,
-  idleTimeoutMinutes: 30,
+  idleTimeoutMinutes: 15,
 };
 
 function configDir(baseDir?: string): string {
