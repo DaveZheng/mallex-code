@@ -27,6 +27,7 @@ describe("config", () => {
       serverPort: 9090,
       proxyPort: 4000,
       idleTimeoutMinutes: 60,
+      onExitServer: "keep",
     };
     saveConfig(custom, tmpDir);
     const loaded = loadConfig(tmpDir);
@@ -40,5 +41,13 @@ describe("config", () => {
     const loaded = loadConfig(tmpDir);
     assert.strictEqual(loaded.model, "custom-model");
     assert.strictEqual(loaded.serverPort, DEFAULT_CONFIG.serverPort);
+  });
+
+  it("defaults onExitServer to 'ask' for old configs", () => {
+    const oldConfig = { model: "some-model", serverPort: 8080, proxyPort: 3456, idleTimeoutMinutes: 15 };
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, "config.json"), JSON.stringify(oldConfig));
+    const loaded = loadConfig(tmpDir);
+    assert.strictEqual(loaded.onExitServer, "ask");
   });
 });

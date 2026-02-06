@@ -100,6 +100,27 @@ describe("createStreamTranslator", () => {
     assert.strictEqual(msgDelta.data.delta.stop_reason, "tool_use");
   });
 
+  it("strips <|im_end|> tokens from streamed deltas", () => {
+    const translator = createStreamTranslator(model);
+    translator.push(makeChunk("Hello"));
+    const output = translator.push(makeChunk(" world.<|im_end|>"));
+    const events = parseEvents(output);
+    const delta = events.find((e) => e.event === "content_block_delta");
+    assert.ok(delta);
+    assert.strictEqual(delta.data.delta.text, " world.");
+    assert.ok(!delta.data.delta.text.includes("<|im_end|>"), "should not contain im_end token");
+  });
+
+  it("handles chunk that is only <|im_end|>", () => {
+    const translator = createStreamTranslator(model);
+    translator.push(makeChunk("Hello"));
+    const output = translator.push(makeChunk("<|im_end|>"));
+    // Should just get the header ensure, no delta with im_end
+    const events = parseEvents(output);
+    const delta = events.find((e) => e.event === "content_block_delta");
+    assert.ok(!delta, "should not emit a delta for a pure im_end chunk");
+  });
+
   it("handles empty stream gracefully", () => {
     const translator = createStreamTranslator(model);
     const output = translator.finish();

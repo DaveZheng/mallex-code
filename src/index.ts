@@ -6,18 +6,19 @@ import { ensureServer, stopServer } from "./server.js";
 import { startProxy } from "./proxy.js";
 import { execFileSync, spawn } from "node:child_process";
 import readline from "node:readline";
+import { handleServerShutdown } from "./shutdown-prompt.js";
 
 let proxyServer: http.Server | undefined;
 
-function cleanup(): void {
+function cleanupSync(): void {
   if (proxyServer) {
     proxyServer.close();
     proxyServer = undefined;
   }
 }
 
-process.on("SIGINT", () => { cleanup(); process.exit(130); });
-process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+process.on("SIGINT", () => { cleanupSync(); process.exit(130); });
+process.on("SIGTERM", () => { cleanupSync(); process.exit(143); });
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -71,6 +72,16 @@ async function main(): Promise<void> {
   if (proxyOnly) {
     console.log(`\nTo use with Claude Code:`);
     console.log(`  ANTHROPIC_BASE_URL=http://localhost:${config.proxyPort} ANTHROPIC_AUTH_TOKEN=local claude`);
+
+    // Override SIGINT in proxy-only mode to show shutdown prompt
+    process.removeAllListeners("SIGINT");
+    process.on("SIGINT", async () => {
+      console.log();
+      cleanupSync();
+      await handleServerShutdown(config);
+      process.exit(0);
+    });
+
     return;
   }
 
@@ -80,7 +91,7 @@ async function main(): Promise<void> {
   } catch {
     console.error("\nError: 'claude' not found in PATH.");
     console.error("Install Claude Code: https://docs.anthropic.com/en/docs/claude-code");
-    cleanup();
+    cleanupSync();
     process.exit(1);
   }
 
@@ -94,20 +105,21 @@ async function main(): Promise<void> {
     },
   });
 
-  claude.on("exit", (code) => {
-    cleanup();
+  claude.on("exit", async (code) => {
+    cleanupSync();
+    await handleServerShutdown(config);
     process.exit(code ?? 0);
   });
 
   claude.on("error", (err) => {
     console.error("Failed to launch claude:", err.message);
-    cleanup();
+    cleanupSync();
     process.exit(1);
   });
 }
 
 main().catch((err) => {
   console.error("Fatal:", err.message);
-  cleanup();
+  cleanupSync();
   process.exit(1);
 });

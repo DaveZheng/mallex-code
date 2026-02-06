@@ -3,6 +3,7 @@
  */
 
 import { injectToolDefinitions } from "./prompt.js";
+import { trimSystemPrompt, trimMessages } from "./prompt-trimmer.js";
 import type { OpenAIChatRequest } from "./client.js";
 
 /** Anthropic content block types */
@@ -91,20 +92,23 @@ function extractSystemPrompt(system: AnthropicRequest["system"]): string {
  * Translate an Anthropic Messages API request to an OpenAI Chat Completions request.
  */
 export function translateRequest(req: AnthropicRequest, mlxModel: string): OpenAIChatRequest {
-  // Build system prompt: Claude Code's system + injected tool definitions
+  // Build system prompt: trim for model size, then inject tool definitions
   let systemPrompt = extractSystemPrompt(req.system);
+  systemPrompt = trimSystemPrompt(systemPrompt, mlxModel);
   systemPrompt = injectToolDefinitions(systemPrompt);
 
-  // Convert messages
+  // Trim infrastructure noise from user messages, then convert
+  const trimmedMsgs = trimMessages(req.messages);
+
   const messages: { role: string; content: string }[] = [
     { role: "system", content: systemPrompt },
   ];
 
-  for (const msg of req.messages) {
-    messages.push({
-      role: msg.role,
-      content: flattenContent(msg.content, msg.role),
-    });
+  for (const msg of trimmedMsgs) {
+    const content = flattenContent(msg.content, msg.role);
+    if (content) {
+      messages.push({ role: msg.role, content });
+    }
   }
 
   return {

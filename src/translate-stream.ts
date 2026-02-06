@@ -64,7 +64,11 @@ export function createStreamTranslator(model: string): StreamTranslator {
 
   return {
     push(chunk: OpenAIStreamChunk): string {
-      const delta = chunk.choices?.[0]?.delta?.content;
+      const raw = chunk.choices?.[0]?.delta?.content;
+      if (!raw) return ensureHeader();
+
+      // Strip special tokens that leak from Qwen/Llama models
+      const delta = raw.replace(/<\|im_end\|>/g, "").replace(/<\|im_start\|>/g, "");
       if (!delta) return ensureHeader();
 
       accumulated += delta;
