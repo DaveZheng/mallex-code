@@ -18,6 +18,22 @@ ARCH="$(uname -m)"
 [ "$OS" = "Darwin" ] || error "mallex requires macOS (detected: $OS). MLX only runs on Apple Silicon."
 [ "$ARCH" = "arm64" ] || error "mallex requires Apple Silicon / arm64 (detected: $ARCH)."
 
+# --- Dependency checks ---
+if ! command -v python3 >/dev/null 2>&1; then
+  info ""
+  info "WARNING: python3 not found."
+  info "  mallex will create a Python venv and install mlx-lm on first run."
+  info "  Install Python 3.10+ first: brew install python@3.12"
+  info ""
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  info ""
+  info "WARNING: Claude Code not found."
+  info "  Install it: https://docs.anthropic.com/en/docs/claude-code"
+  info ""
+fi
+
 # --- Resolve version ---
 if [ -z "$VERSION" ]; then
   info "Fetching latest release..."
