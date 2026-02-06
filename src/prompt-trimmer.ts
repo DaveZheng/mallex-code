@@ -1,14 +1,32 @@
 /**
  * Trim Claude Code's system prompt based on the local model's size.
  *
- * Claude Code sends a ~2000-3000 token system prompt designed for Claude
- * (Opus/Sonnet). Most of it is useless or harmful for small local models —
- * it burns prefill time and confuses the model with irrelevant instructions.
+ * Instead of replacing the prompt wholesale, we surgically strip sections
+ * that reference Claude Code infrastructure the local model can't use,
+ * while preserving the core behavioral instructions that make it a good
+ * coding assistant.
  *
- * Strategy:
- *  - small  (≤8B):  Replace with minimal prompt, keep env + user instructions
- *  - medium (9-32B): Moderate prompt, keep env + user instructions
- *  - large  (>32B):  Keep full prompt
+ * Trimming tiers (by section priority):
+ *
+ *   Always strip (all tiers):
+ *     - "# Using your tools" — references Claude Code tools (Read/Edit/Glob/etc.)
+ *     - "# auto memory" — local model can't write to memory files
+ *     - "# MCP Server Instructions" — local model has no MCP
+ *     - "# System" — Claude Code infrastructure (permissions, hooks, etc.)
+ *     - Claude-specific identity line
+ *     - Anthropic-specific security rules
+ *     - Model/knowledge cutoff info in Environment
+ *
+ *   Strip for small (≤8B) only:
+ *     - "# Executing actions with care" — verbose examples, condensed into Doing tasks
+ *     - Git commit/PR workflow instructions
+ *
+ *   Always keep:
+ *     - "# Doing tasks" — core coding behavior (read before edit, don't over-engineer, etc.)
+ *     - "# Tone and style" — concise, no emojis
+ *     - Environment (working dir, platform, git branch)
+ *     - User instructions (CLAUDE.md / MEMORY.md content)
+ *     - Git status snapshot
  */
 
 import type { AnthropicMessage, AnthropicContentBlock, AnthropicTextBlock } from "./translate-request.js";
@@ -36,61 +54,56 @@ export function getModelTier(modelId: string): ModelTier {
   return "large";
 }
 
-// ── Extraction helpers ──────────────────────────────────────────────
+// ── Section stripping ──────────────────────────────────────────────
 
 /**
- * Extract environment context (working directory, branch, platform).
+ * Remove a markdown section by heading (e.g., "# Using your tools").
+ * Removes everything from the heading to the next same-level heading or end.
  */
-function extractEnvironment(prompt: string): string {
-  const lines: string[] = [];
-
-  const wdMatch = prompt.match(/Primary working directory:\s*(.+)/);
-  if (wdMatch) lines.push(`Working directory: ${wdMatch[1].trim()}`);
-
-  const branchMatch = prompt.match(/Current branch:\s*(.+)/);
-  if (branchMatch) lines.push(`Git branch: ${branchMatch[1].trim()}`);
-
-  const platformMatch = prompt.match(/Platform:\s*(.+)/);
-  if (platformMatch) lines.push(`Platform: ${platformMatch[1].trim()}`);
-
-  return lines.length > 0 ? lines.join("\n") : "";
+function stripSection(prompt: string, heading: string): string {
+  // Determine heading level
+  const level = heading.match(/^(#+)/)?.[1].length ?? 1;
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Match from heading to next same-or-higher-level heading or end
+  const pattern = new RegExp(
+    `\\n?${escapedHeading}\\n[\\s\\S]*?(?=\\n#{1,${level}} [^#]|$)`,
+  );
+  return prompt.replace(pattern, "");
 }
+
+/**
+ * Remove a specific text block from the prompt.
+ */
+function stripText(prompt: string, text: string): string {
+  return prompt.replace(text, "");
+}
+
+/**
+ * Remove lines matching a pattern.
+ */
+function stripLines(prompt: string, pattern: RegExp): string {
+  return prompt.split("\n").filter((line) => !pattern.test(line)).join("\n");
+}
+
+/**
+ * Collapse 3+ consecutive newlines to 2.
+ */
+function collapseNewlines(prompt: string): string {
+  return prompt.replace(/\n{3,}/g, "\n\n");
+}
+
+// ── Extraction helpers ──────────────────────────────────────────────
 
 /**
  * Extract user-specific instructions (CLAUDE.md / MEMORY.md content).
  * Looks for "Contents of ...:" blocks and grabs their content.
  */
 function extractUserInstructions(prompt: string): string {
-  // Match "Contents of /path/to/file:" followed by content until the next
-  // top-level section, gitStatus block, or end of string.
   const match = prompt.match(
     /Contents of [^\n]+:\s*\n([\s\S]*?)(?=\n(?:gitStatus:|IMPORTANT:|<system-reminder>)|$)/,
   );
   return match ? match[1].trim() : "";
 }
-
-// ── Tier-specific system prompts ────────────────────────────────────
-
-const SMALL_SYSTEM = `You are a coding assistant. Help the user with software engineering tasks concisely and accurately.
-
-Rules:
-- For general knowledge questions, answer directly without using tools.
-- Only use tools when the task involves files or the filesystem.
-- Never guess or hallucinate file contents — use tools to read them.
-- Read files before editing them.
-- Keep responses short and focused.`;
-
-const MEDIUM_SYSTEM = `You are a coding assistant that helps users with software engineering tasks.
-
-Rules:
-- For general knowledge questions, answer directly without using tools.
-- Only use tools when the task involves files or the filesystem. Never guess file contents.
-- Read files before editing them.
-- Keep responses concise and focused on the task.
-- When editing files, prefer targeted edits over full rewrites.
-- Do not create files unless necessary.
-- Write secure code — avoid injection vulnerabilities.
-- Only commit changes when explicitly asked.`;
 
 // ── Main entry point ────────────────────────────────────────────────
 
@@ -101,15 +114,89 @@ export function trimSystemPrompt(systemPrompt: string, modelId: string): string 
     return systemPrompt;
   }
 
-  const env = extractEnvironment(systemPrompt);
-  const userInstructions = extractUserInstructions(systemPrompt);
-  const basePrompt = tier === "small" ? SMALL_SYSTEM : MEDIUM_SYSTEM;
+  let prompt = systemPrompt;
 
-  const sections = [basePrompt];
-  if (env) sections.push(`## Environment\n${env}`);
-  if (userInstructions) sections.push(`## Project Instructions\n${userInstructions}`);
+  // ── Always strip (all non-large tiers) ──────────────────────────
 
-  return sections.join("\n\n");
+  // Claude-specific identity
+  prompt = stripText(prompt, "You are Claude Code, Anthropic's official CLI for Claude.\n");
+
+  // Anthropic-specific security block
+  prompt = prompt.replace(
+    /IMPORTANT: Assist with authorized security testing[\s\S]*?(?=IMPORTANT: You must NEVER|# System|\n\n)/,
+    "",
+  );
+  prompt = prompt.replace(
+    /IMPORTANT: You must NEVER generate or guess URLs[^\n]*\n[^\n]*\n/,
+    "",
+  );
+
+  // "# System" — Claude Code infrastructure (permissions, hooks, compression, etc.)
+  prompt = stripSection(prompt, "# System");
+
+  // "# Using your tools" — references Claude Code's tools, not ours
+  prompt = stripSection(prompt, "# Using your tools");
+
+  // "# auto memory" — local model can't write to memory files
+  // But preserve user instructions (MEMORY.md content) first
+  const userInstructions = extractUserInstructions(prompt);
+  prompt = stripSection(prompt, "# auto memory");
+
+  // "# MCP Server Instructions"
+  prompt = stripSection(prompt, "# MCP Server Instructions");
+
+  // Model/knowledge cutoff info in Environment — not relevant
+  prompt = stripLines(prompt, /You are powered by the model/);
+  prompt = stripLines(prompt, /Assistant knowledge cutoff/);
+  prompt = stripLines(prompt, /The most recent Claude model family/);
+  prompt = stripLines(prompt, /The current date is/);
+
+  // Feedback/help links — not applicable
+  prompt = prompt.replace(
+    / - If the user asks for help[\s\S]*?\/issues\n/,
+    "",
+  );
+
+  // ── Strip for small tier only ───────────────────────────────────
+
+  if (tier === "small") {
+    // "# Executing actions with care" — too verbose for small models
+    prompt = stripSection(prompt, "# Executing actions with care");
+
+    // Git commit/PR sections within "# Doing tasks" if present
+    prompt = prompt.replace(
+      /# Committing changes with git[\s\S]*?(?=# Creating pull requests|# Other common|# Tone|$)/,
+      "",
+    );
+    prompt = prompt.replace(
+      /# Creating pull requests[\s\S]*?(?=# Other common|# Tone|$)/,
+      "",
+    );
+    prompt = prompt.replace(
+      /# Other common operations[\s\S]*?(?=# Tone|$)/,
+      "",
+    );
+  }
+
+  // ── Add general-knowledge rule and re-inject user instructions ──
+
+  // Add rule about answering general questions directly
+  const generalRule = "\n- For general knowledge questions, answer directly without using tools.";
+  const doingTasksIdx = prompt.indexOf("# Doing tasks");
+  if (doingTasksIdx !== -1) {
+    // Insert after the first line of "# Doing tasks" section
+    const nextNewline = prompt.indexOf("\n", doingTasksIdx);
+    if (nextNewline !== -1) {
+      prompt = prompt.slice(0, nextNewline + 1) + generalRule + prompt.slice(nextNewline + 1);
+    }
+  }
+
+  // Re-inject user instructions if we had them
+  if (userInstructions) {
+    prompt += `\n\n## Project Instructions\n${userInstructions}`;
+  }
+
+  return collapseNewlines(prompt).trim();
 }
 
 // ── Message trimming ─────────────────────────────────────────────────

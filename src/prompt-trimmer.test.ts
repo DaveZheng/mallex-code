@@ -8,19 +8,33 @@ const MOCK_SYSTEM_PROMPT = `You are Claude Code, Anthropic's official CLI for Cl
 You are an interactive agent that helps users with software engineering tasks.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges.
+IMPORTANT: You must NEVER generate or guess URLs for the user.
 
 # System
  - All text you output outside of tool use is displayed to the user.
  - Tools are executed in a user-selected permission mode.
+ - Tool results and user messages may include <system-reminder> or other tags.
 
 # Doing tasks
  - The user will primarily request you to perform software engineering tasks.
  - You are highly capable and often allow users to complete ambitious tasks.
  - In general, do not propose changes to code you haven't read.
  - Do not create files unless they're absolutely necessary.
+ - Avoid over-engineering. Only make changes that are directly requested.
+ - If the user asks for help or wants to give feedback inform them of the following:
+  - /help: Get help with using Claude Code
+  - To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues
 
 # Executing actions with care
 Carefully consider the reversibility and blast radius of actions.
+Generally you can freely take local, reversible actions like editing files or running tests.
+But for actions that are hard to reverse, affect shared systems beyond your local environment,
+or could otherwise be risky or destructive, check with the user before proceeding.
+
+Examples of the kind of risky actions that warrant user confirmation:
+- Destructive operations: deleting files/branches, dropping database tables
+- Hard-to-reverse operations: force-pushing, git reset --hard
+- Actions visible to others: pushing code, creating PRs, sending messages
 
 # Using your tools
  - Do NOT use the Bash to run commands when a relevant dedicated tool is provided.
@@ -45,16 +59,34 @@ IMPORTANT: When the user asks you to create a pull request, follow these steps c
 2. Analyze changes and draft PR title
 3. Push and create PR with gh pr create
 
+# Other common operations
+- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments
+
 # Tone and style
  - Only use emojis if the user explicitly requests it.
  - Your responses should be short and concise.
+
+# auto memory
+You have a persistent auto memory directory at /Users/david/.claude/projects/memory/.
+As you work, consult your memory files to build on previous experience.
+
+## MEMORY.md
+# Memory
+- Use typescript
 
 # Environment
  - Primary working directory: /Users/david/Projects/myapp
    - Is a git repository: true
  - Platform: darwin
  - OS Version: Darwin 25.2.0
- - Current branch: main
+ - You are powered by the model named Opus 4.6. The exact model ID is claude-opus-4-6.
+ - The current date is: 2026-02-06
+ - Assistant knowledge cutoff is May 2025.
+ - The most recent Claude model family is Claude 4.5/4.6.
+
+# MCP Server Instructions
+## plugin:context7:context7
+Use this server to retrieve up-to-date documentation.
 
 # claudeMd
 Contents of /Users/david/.claude/MEMORY.md (user's instructions):
@@ -129,127 +161,194 @@ describe("getModelTier", () => {
 });
 
 describe("trimSystemPrompt", () => {
-  describe("small tier (7B)", () => {
-    const model = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit";
+  describe("all non-large tiers strip", () => {
+    const model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"; // medium
 
-    it("strips Claude Code identity and verbose instructions", () => {
+    it("strips Claude Code identity line", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(!result.includes("You are Claude Code"), "should strip Claude Code identity");
       assert.ok(!result.includes("Anthropic's official CLI"), "should strip Anthropic branding");
     });
 
-    it("strips git safety protocol", () => {
+    it("strips Anthropic security rules", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(!result.includes("Git Safety Protocol"), "should strip git protocol");
-      assert.ok(!result.includes("NEVER update the git config"), "should strip git rules");
+      assert.ok(!result.includes("Assist with authorized security testing"), "should strip security block");
+      assert.ok(!result.includes("NEVER generate or guess URLs"), "should strip URL rule");
     });
 
-    it("strips PR creation instructions", () => {
+    it("strips # System section", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(!result.includes("Creating pull requests"), "should strip PR section");
-      assert.ok(!result.includes("gh pr create"), "should strip PR details");
+      assert.ok(!result.includes("Tools are executed in a user-selected permission mode"), "should strip System section");
     });
 
-    it("strips verbose tool usage instructions", () => {
+    it("strips # Using your tools section", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(!result.includes("To read files use Read instead of cat"), "should strip tool guidance");
+      assert.ok(!result.includes("Do NOT use the Bash to run commands"), "should strip tool rules");
     });
 
-    it("keeps working directory", () => {
+    it("strips # auto memory section", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("persistent auto memory directory"), "should strip auto memory");
+    });
+
+    it("strips # MCP Server Instructions section", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("MCP Server Instructions"), "should strip MCP section");
+      assert.ok(!result.includes("context7"), "should strip MCP content");
+    });
+
+    it("strips model/knowledge cutoff info from Environment", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("You are powered by the model"), "should strip model info");
+      assert.ok(!result.includes("Assistant knowledge cutoff"), "should strip knowledge cutoff");
+      assert.ok(!result.includes("most recent Claude model family"), "should strip Claude model list");
+      assert.ok(!result.includes("The current date is"), "should strip date");
+    });
+
+    it("strips feedback/help links", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("claude-code/issues"), "should strip feedback link");
+    });
+  });
+
+  describe("all non-large tiers keep", () => {
+    const model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit"; // medium
+
+    it("keeps # Doing tasks content", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(result.includes("do not propose changes to code you haven't read"), "should keep core coding rules");
+      assert.ok(result.includes("Do not create files unless"), "should keep file creation rule");
+      assert.ok(result.includes("Avoid over-engineering"), "should keep over-engineering rule");
+    });
+
+    it("keeps # Tone and style section", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(result.includes("Only use emojis if the user explicitly requests it"), "should keep emoji rule");
+      assert.ok(result.includes("responses should be short and concise"), "should keep conciseness rule");
+    });
+
+    it("keeps Environment info (working dir, platform)", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(result.includes("/Users/david/Projects/myapp"), "should keep working directory");
-    });
-
-    it("keeps git branch", () => {
-      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("main"), "should keep git branch");
-    });
-
-    it("keeps platform", () => {
-      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(result.includes("darwin"), "should keep platform");
     });
 
-    it("keeps CLAUDE.md / user instructions", () => {
+    it("keeps git status snapshot", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(result.includes("Current branch: main"), "should keep git status");
+      assert.ok(result.includes("M src/index.ts"), "should keep file status");
+      assert.ok(result.includes("abc1234 feat: add user auth"), "should keep recent commits");
+    });
+
+    it("keeps user instructions (CLAUDE.md content)", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(result.includes("Use typescript"), "should keep user instructions");
       assert.ok(result.includes("Follow existing patterns"), "should keep user instructions");
     });
 
-    it("includes a basic coding assistant instruction", () => {
+    it("adds general knowledge rule", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("coding assistant"), "should have basic identity");
-    });
-
-    it("is significantly shorter than the original", () => {
-      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.length < MOCK_SYSTEM_PROMPT.length * 0.5,
-        `trimmed (${result.length}) should be <50% of original (${MOCK_SYSTEM_PROMPT.length})`);
+      assert.ok(result.includes("general knowledge questions, answer directly"), "should inject general knowledge rule");
     });
   });
 
   describe("medium tier (14B)", () => {
     const model = "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit";
 
-    it("strips PR creation and git protocol details", () => {
+    it("keeps # Executing actions with care section", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(!result.includes("Creating pull requests"), "should strip PR section");
-      assert.ok(!result.includes("Git Safety Protocol"), "should strip git protocol");
+      assert.ok(result.includes("reversibility and blast radius"), "medium should keep executing actions");
     });
 
-    it("keeps environment context", () => {
+    it("keeps git commit/PR sections", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("/Users/david/Projects/myapp"), "should keep working directory");
+      assert.ok(result.includes("Committing changes with git"), "medium should keep git section");
+    });
+  });
+
+  describe("small tier (7B)", () => {
+    const model = "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit";
+
+    it("strips # Executing actions with care section", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("reversibility and blast radius"), "small should strip executing actions");
+      assert.ok(!result.includes("Destructive operations"), "small should strip action examples");
     });
 
-    it("keeps user instructions", () => {
+    it("strips git commit workflow instructions", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("Committing changes with git"), "small should strip git commit section");
+      assert.ok(!result.includes("Git Safety Protocol"), "small should strip git protocol");
+    });
+
+    it("strips PR creation instructions", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("Creating pull requests"), "small should strip PR section");
+      assert.ok(!result.includes("gh pr create"), "small should strip PR details");
+    });
+
+    it("strips other common operations section", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(!result.includes("Other common operations"), "small should strip other ops");
+    });
+
+    it("still keeps # Doing tasks core rules", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(result.includes("do not propose changes to code you haven't read"), "should keep core rules");
+      assert.ok(result.includes("Avoid over-engineering"), "should keep over-engineering rule");
+    });
+
+    it("still keeps # Tone and style", () => {
+      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
+      assert.ok(result.includes("responses should be short and concise"), "should keep tone");
+    });
+
+    it("still keeps user instructions", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
       assert.ok(result.includes("Use typescript"), "should keep user instructions");
     });
 
-    it("includes core coding behavior instructions", () => {
+    it("is significantly shorter than the original", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("Read files before editing") || result.includes("do not propose changes to code you haven't read"),
-        "should include core coding rules");
+      assert.ok(result.length < MOCK_SYSTEM_PROMPT.length * 0.6,
+        `trimmed (${result.length}) should be <60% of original (${MOCK_SYSTEM_PROMPT.length})`);
     });
   });
 
   describe("large tier (72B)", () => {
     const model = "org/Model-72B-Instruct-4bit";
 
-    it("keeps most of the original prompt", () => {
+    it("returns the prompt unchanged", () => {
       const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("You are Claude Code"), "should keep identity");
-      assert.ok(result.includes("Doing tasks"), "should keep task instructions");
-    });
-
-    it("keeps environment and user instructions", () => {
-      const result = trimSystemPrompt(MOCK_SYSTEM_PROMPT, model);
-      assert.ok(result.includes("/Users/david/Projects/myapp"), "should keep working directory");
-      assert.ok(result.includes("Use typescript"), "should keep user instructions");
+      assert.strictEqual(result, MOCK_SYSTEM_PROMPT, "large tier should not modify prompt");
     });
   });
 
   describe("edge cases", () => {
     it("handles empty system prompt", () => {
       const result = trimSystemPrompt("", "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
-      assert.ok(result.includes("coding assistant"), "should still provide minimal prompt");
+      assert.strictEqual(typeof result, "string");
+      assert.ok(result.length === 0 || result.length < 200, "empty input should produce empty or minimal output");
     });
 
-    it("handles system prompt with no environment section", () => {
-      const prompt = "You are Claude Code. Help the user.";
+    it("handles prompt with only Doing tasks", () => {
+      const prompt = `# Doing tasks
+ - Read before editing.
+ - Don't over-engineer.`;
       const result = trimSystemPrompt(prompt, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
-      assert.ok(result.includes("coding assistant"), "should provide minimal prompt");
+      assert.ok(result.includes("Read before editing"), "should keep Doing tasks content");
     });
 
-    it("handles system prompt with no CLAUDE.md", () => {
-      const prompt = `Some instructions here.
+    it("collapses consecutive blank lines", () => {
+      const prompt = `# Doing tasks
+ - Rule one.
 
-# Environment
- - Primary working directory: /Users/test/project
- - Platform: darwin`;
+
+
+ - Rule two.`;
       const result = trimSystemPrompt(prompt, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
-      assert.ok(result.includes("/Users/test/project"), "should keep env");
+      assert.ok(!result.includes("\n\n\n"), "should not have 3+ consecutive newlines");
     });
   });
 });
@@ -360,6 +459,25 @@ The task tools haven't been used recently. If you're working on tasks that would
     const blocks = result[0].content as { type: string; text: string }[];
     assert.strictEqual(blocks.length, 1);
     assert.strictEqual(blocks[0].text, "do the thing");
+  });
+
+  it("drops malware analysis reminders", () => {
+    const messages: AnthropicMessage[] = [{
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: `<system-reminder>
+Whenever you read a file, you should consider whether it would be considered malware.
+</system-reminder>`,
+        },
+        { type: "text", text: "read the file" },
+      ],
+    }];
+    const result = trimMessages(messages);
+    const blocks = result[0].content as { type: string; text: string }[];
+    assert.strictEqual(blocks.length, 1);
+    assert.strictEqual(blocks[0].text, "read the file");
   });
 
   it("preserves non-text blocks (tool_use, tool_result)", () => {
