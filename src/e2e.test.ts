@@ -26,9 +26,7 @@ describe("e2e proxy test", { skip: !process.env.MLX_E2E }, () => {
       throw new Error(`mlx-lm server not running on port ${serverPort} — start it first`);
     }
 
-    proxyServer = startProxy({ proxyPort, serverPort, model });
-    // Wait for the server to be listening
-    await new Promise<void>((resolve) => proxyServer.on("listening", resolve));
+    proxyServer = await startProxy({ proxyPort, serverPort, model });
   });
 
   after(() => {

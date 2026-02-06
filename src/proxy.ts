@@ -4,10 +4,26 @@
  */
 
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { translateRequest, type AnthropicRequest } from "./translate-request.js";
 import { translateResponse } from "./translate-response.js";
 import { chatCompletion, chatCompletionStream } from "./client.js";
 import { createStreamTranslator } from "./translate-stream.js";
+
+function debugLogRequest(anthropicReq: AnthropicRequest): void {
+  try {
+    const dir = path.join(os.homedir(), ".mallex");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "last-request.json"),
+      JSON.stringify(anthropicReq, null, 2),
+    );
+  } catch {
+    // Debug logging should never break the proxy
+  }
+}
 
 export interface ProxyOptions {
   proxyPort: number;
@@ -17,14 +33,25 @@ export interface ProxyOptions {
 
 /**
  * Start the translation proxy server.
- * Returns the HTTP server instance (for testing/lifecycle management).
+ * Returns a promise that resolves with the HTTP server once it's listening.
  */
-export function startProxy(options: ProxyOptions): http.Server {
+export function startProxy(options: ProxyOptions): Promise<http.Server> {
   const { proxyPort, serverPort, model } = options;
 
   const server = http.createServer(async (req, res) => {
-    // Only handle POST /v1/messages
-    if (req.method !== "POST" || req.url !== "/v1/messages") {
+    const pathname = req.url?.split("?")[0];
+
+    // Handle token counting — Claude Code calls this to validate the model
+    if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+      const body = await readBody(req);
+      const parsed = JSON.parse(body);
+      const estimatedTokens = JSON.stringify(parsed.messages ?? []).length / 4;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ input_tokens: Math.ceil(estimatedTokens) }));
+      return;
+    }
+
+    if (req.method !== "POST" || pathname !== "/v1/messages") {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { type: "not_found", message: "Not found" } }));
       return;
@@ -33,6 +60,7 @@ export function startProxy(options: ProxyOptions): http.Server {
     try {
       const body = await readBody(req);
       const anthropicReq: AnthropicRequest = JSON.parse(body);
+      debugLogRequest(anthropicReq);
       const openaiReq = translateRequest(anthropicReq, model);
 
       if (anthropicReq.stream) {
@@ -49,13 +77,15 @@ export function startProxy(options: ProxyOptions): http.Server {
     }
   });
 
-  server.listen(proxyPort, () => {
-    console.log(`mallex-proxy listening on http://localhost:${proxyPort}`);
-    console.log(`  forwarding to mlx-lm.server on port ${serverPort}`);
-    console.log(`  model: ${model}`);
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(proxyPort, () => {
+      console.log(`mallex-proxy listening on http://localhost:${proxyPort}`);
+      console.log(`  forwarding to mlx-lm.server on port ${serverPort}`);
+      console.log(`  model: ${model}`);
+      resolve(server);
+    });
   });
-
-  return server;
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {

@@ -7,13 +7,15 @@ export interface MallexConfig {
   serverPort: number;
   proxyPort: number;
   idleTimeoutMinutes: number;
+  onExitServer: "ask" | "stop" | "keep";
 }
 
 export const DEFAULT_CONFIG: MallexConfig = {
   model: "",
   serverPort: 8080,
   proxyPort: 3456,
-  idleTimeoutMinutes: 30,
+  idleTimeoutMinutes: 15,
+  onExitServer: "ask",
 };
 
 function configDir(baseDir?: string): string {

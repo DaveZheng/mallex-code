@@ -67,6 +67,8 @@ describe("translateRequest", () => {
   });
 
   it("handles system prompt as array of text blocks", () => {
+    // Use a large model so the trimmer preserves the full system prompt
+    const largeModel = "mlx-community/Model-72B-Instruct-4bit";
     const req: AnthropicRequest = {
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 4096,
@@ -78,7 +80,7 @@ describe("translateRequest", () => {
         { role: "user", content: "Hi" },
       ],
     };
-    const result = translateRequest(req, mlxModel);
+    const result = translateRequest(req, largeModel);
     assert.ok(result.messages[0].content.includes("Part one."));
     assert.ok(result.messages[0].content.includes("Part two."));
   });
