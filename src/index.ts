@@ -2,7 +2,7 @@
 import http from "node:http";
 import { loadConfig, saveConfig } from "./config.js";
 import { getDeviceInfo, recommendModel } from "./device.js";
-import { ensureServer, stopServer } from "./server.js";
+import { ensureDependencies, ensureServer, stopServer } from "./server.js";
 import { startProxy } from "./proxy.js";
 import { execFileSync, spawn } from "node:child_process";
 import readline from "node:readline";
@@ -58,6 +58,9 @@ async function main(): Promise<void> {
     saveConfig(config);
     console.log(`\nModel set to: ${config.model}\n`);
   }
+
+  // Ensure python + mlx-lm are available (creates venv on first run)
+  ensureDependencies();
 
   // Ensure mlx-lm.server is running
   await ensureServer(config.model, config.serverPort);
