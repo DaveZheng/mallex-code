@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
+import { openSync } from "node:fs";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
 const MALLEX_DIR = path.join(os.homedir(), ".mallex");
 const PID_FILE = path.join(MALLEX_DIR, "server.pid");
+const LOG_FILE = path.join(MALLEX_DIR, "server.log");
 const VENV_PYTHON = path.join(MALLEX_DIR, "venv", "bin", "python3");
 
 export function getPythonPath(): string {
@@ -35,16 +37,17 @@ export async function isServerHealthy(port: number): Promise<boolean> {
 export async function startServer(model: string, port: number): Promise<number> {
   const args = buildServerArgs(model, port);
   const pythonPath = getPythonPath();
+  fs.mkdirSync(MALLEX_DIR, { recursive: true });
+  const logFd = openSync(LOG_FILE, "w");
   const child = spawn(pythonPath, args, {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", logFd],
   });
   child.unref();
 
   const pid = child.pid;
   if (!pid) throw new Error("Failed to start mlx-lm server");
 
-  fs.mkdirSync(MALLEX_DIR, { recursive: true });
   fs.writeFileSync(PID_FILE, String(pid) + "\n");
 
   return pid;
