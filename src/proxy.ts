@@ -12,6 +12,9 @@ import { translateResponse } from "./translate-response.js";
 import { chatCompletion, chatCompletionStream } from "./client.js";
 import { createStreamTranslator } from "./translate-stream.js";
 import { isServerHealthy, isOomCrash, startServer, waitForServer } from "./server.js";
+import { loadConfig, type RoutingConfig } from "./config.js";
+import { extractLatestUserText, classifyIntent, resolveRoute } from "./router.js";
+import { claudeCompletion, claudeCompletionStream, ClaudeApiError } from "./claude-client.js";
 
 function debugLogRequest(anthropicReq: AnthropicRequest): void {
   try {
@@ -77,6 +80,7 @@ export interface ProxyOptions {
   proxyPort: number;
   serverPort: number;
   model: string;
+  routing?: RoutingConfig;
 }
 
 /**
@@ -109,6 +113,26 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
       const body = await readBody(req);
       const anthropicReq: AnthropicRequest = JSON.parse(body);
       debugLogRequest(anthropicReq);
+
+      // Route via intent classification if routing is configured
+      const routing = getRoutingConfig();
+      if (routing) {
+        const route = await routeRequest(anthropicReq, model, serverPort, routing);
+        if (route?.target === "claude" && routing.claudeApiKey) {
+          try {
+            await handleClaudeRoute(anthropicReq, routing.claudeApiKey, route.claudeModel, res);
+            return;
+          } catch (err) {
+            if (err instanceof ClaudeApiError) {
+              console.error(`[mallex] Claude API error (${err.status}), falling back to local`);
+            } else {
+              console.error("[mallex] Claude API error, falling back to local");
+            }
+            // Fall through to local MLX path
+          }
+        }
+      }
+
       const openaiReq = translateRequest(anthropicReq, model);
 
       if (anthropicReq.stream) {
@@ -152,6 +176,61 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
       resolve(server);
     });
   });
+}
+
+/**
+ * Re-read routing config from disk on each request so --setup changes take effect without restart.
+ */
+function getRoutingConfig(): RoutingConfig | undefined {
+  try {
+    const config = loadConfig();
+    return config.routing;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Classify the request and resolve a routing decision.
+ * Returns null if classification should be skipped (no routing config, or all rules are tier 1).
+ */
+async function routeRequest(
+  anthropicReq: AnthropicRequest,
+  model: string,
+  serverPort: number,
+  routing: RoutingConfig,
+) {
+  // Skip classification if all rules are tier 1 (everything goes local)
+  const allLocal = Object.values(routing.rules).every((r) => r.tier === 1);
+  if (allLocal) return null;
+
+  const userText = extractLatestUserText(anthropicReq.messages);
+  if (!userText) return null;
+
+  const intent = await classifyIntent(userText, model, serverPort);
+  const route = resolveRoute(intent, routing.rules, routing.tiers);
+  console.error(`[mallex] intent=${route.intent} tier=${route.tier} target=${route.target}`);
+  return route;
+}
+
+/**
+ * Forward an Anthropic request directly to Claude API (no translation needed).
+ */
+async function handleClaudeRoute(
+  anthropicReq: AnthropicRequest,
+  apiKey: string,
+  claudeModel: string | undefined,
+  res: http.ServerResponse,
+): Promise<void> {
+  // Override the model with the tier's configured Claude model
+  const req = claudeModel ? { ...anthropicReq, model: claudeModel } : anthropicReq;
+  if (req.stream) {
+    await claudeCompletionStream(req, { apiKey }, res);
+  } else {
+    const responseBody = await claudeCompletion(req, { apiKey });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(responseBody);
+  }
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {

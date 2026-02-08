@@ -7,6 +7,7 @@ import { startProxy, setShuttingDown } from "./proxy.js";
 import { execFileSync, spawn } from "node:child_process";
 import readline from "node:readline";
 import { handleServerShutdown } from "./shutdown-prompt.js";
+import { runRouterSetup } from "./setup-router.js";
 
 let proxyServer: http.Server | undefined;
 
@@ -32,7 +33,23 @@ async function main(): Promise<void> {
     }
   }
 
-  const proxyOnly = args[0] === "proxy";
+  // Handle --setup: re-run router setup on existing config
+  if (args.includes("--setup")) {
+    const config = loadConfig();
+    if (!config.model) {
+      console.error("Error: Run mallex first to set up a model before configuring routing.");
+      process.exit(1);
+    }
+    const result = await runRouterSetup(config.model);
+    config.routing = result.routing;
+    saveConfig(config);
+    console.log("\nRouting configuration saved.");
+    return;
+  }
+
+  // Strip --setup from args passed to claude (in case it's combined with other flags)
+  const filteredArgs = args.filter((a) => a !== "--setup");
+  const proxyOnly = filteredArgs[0] === "proxy";
 
   const config = loadConfig();
 
@@ -60,6 +77,13 @@ async function main(): Promise<void> {
     console.log(`\nModel set to: ${config.model}\n`);
   }
 
+  // Routing setup (runs on first run or when upgrading from pre-routing config)
+  if (!config.routing) {
+    const routingResult = await runRouterSetup(config.model);
+    config.routing = routingResult.routing;
+    saveConfig(config);
+  }
+
   // Ensure python + mlx-lm are available (creates venv on first run)
   ensureDependencies();
 
@@ -71,6 +95,7 @@ async function main(): Promise<void> {
     proxyPort: config.proxyPort,
     serverPort: config.serverPort,
     model: config.model,
+    routing: config.routing,
   });
 
   if (proxyOnly) {
@@ -100,7 +125,7 @@ async function main(): Promise<void> {
   }
 
   // Spawn claude with inherited stdio so it takes over the terminal
-  const claude = spawn("claude", args, {
+  const claude = spawn("claude", filteredArgs, {
     stdio: "inherit",
     env: {
       ...process.env,

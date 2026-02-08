@@ -34,25 +34,79 @@ mallex
 # Start proxy only (for use with an existing Claude Code session)
 mallex proxy
 
+# Re-configure intent-based routing
+mallex --setup
+
 # Stop the background mlx-lm.server
 mallex server stop
 ```
 
-On first run, mallex detects your hardware and recommends a model. You can accept the recommendation or provide a custom model ID.
+On first run, mallex detects your hardware, recommends a model, and walks you through intent-based routing setup.
 
 ## How It Works
 
 ```
-Claude Code  →  mallex proxy (localhost:3456)  →  mlx-lm.server (localhost:8080)
- Anthropic        translates request/response        OpenAI Chat Completions
- Messages API     trims prompts for model size        serves local MLX model
+                                    ┌→ mlx-lm.server (localhost:8080)
+Claude Code  →  mallex proxy ──────┤   local MLX model
+ Anthropic     classifies intent   └→ Anthropic API
+ Messages API  routes by effort       Claude Sonnet / Opus
 ```
 
-1. **Starts mlx-lm.server** with your chosen model if not already running
-2. **Translates requests** from Anthropic Messages API → OpenAI Chat Completions
-3. **Trims prompts** — Claude Code sends ~24K chars of system prompt overhead; mallex trims this to fit the model's practical context budget
-4. **Injects tool definitions** as XML in the system prompt so the local model can use tools (read_file, write_file, edit_file, bash, glob, grep)
-5. **Translates responses** back from OpenAI format → Anthropic format (including streaming)
+1. **Classifies intent** — uses your local model to classify each request as low, medium, or high effort
+2. **Routes by effort** — sends simple tasks to local MLX, complex tasks to Claude API (configurable per tier)
+3. **Translates requests** from Anthropic Messages API → OpenAI Chat Completions (for local model path)
+4. **Trims prompts** — Claude Code sends ~24K chars of system prompt overhead; mallex trims this to fit the model's practical context budget
+5. **Injects tool definitions** as XML in the system prompt so the local model can use tools (read_file, write_file, edit_file, bash, glob, grep)
+6. **Translates responses** back from OpenAI format → Anthropic format (including streaming)
+
+## Intent-Based Routing
+
+mallex classifies every request by complexity and routes it to the right model. This is inspired by [NVIDIA's LLM Router](https://build.nvidia.com/nvidia/llm-router) pattern.
+
+### Effort tiers
+
+| Tier | Default (8-32GB) | Default (64GB+ with Qwen3-Coder-Next) |
+|------|-------------------|---------------------------------------|
+| **Low** — chit chat, simple edits | Local MLX | Local MLX |
+| **Medium** — single features, debugging | Claude Sonnet 4.5 | Local MLX (benchmarks near Sonnet) |
+| **High** — architecture, multi-file refactors | Claude Opus 4.6 | Claude Opus 4.6 |
+
+Defaults are recommendations based on your local model's capability. You can override any tier during setup.
+
+### Intent categories
+
+Each request is classified by the local model into one of four categories, which map to tiers automatically:
+
+| Category | Description | Tier |
+|----------|-------------|------|
+| `chit_chat` | Casual conversation, explanations, Q&A | Low |
+| `simple_code` | Single-file edits, renames, fixing imports/typos | Low |
+| `hard_question` | Multi-file refactors, architecture, planning, complex debugging | High |
+| `try_again` | Previous answer was wrong/incomplete — escalates one tier up | Escalates |
+
+### Escalation
+
+When you say "that's wrong" or "try again", mallex escalates to the next tier:
+
+```
+Local MLX (Low) → Claude Sonnet 4.5 (Medium) → Claude Opus 4.6 (High)
+```
+
+If your local model handles medium (64GB+ setups), escalation goes:
+
+```
+Local MLX (Low) → Local MLX (Medium) → Claude Opus 4.6 (High)
+```
+
+### Setup
+
+On first run, mallex walks you through routing configuration. To reconfigure later:
+
+```bash
+mallex --setup
+```
+
+You only need a Claude API key if any tier is configured to use Claude. If no key is provided, Claude tiers fall back to local MLX.
 
 ## Prompt Trimming
 
@@ -152,7 +206,21 @@ Config is stored at `~/.mallex/config.json`:
   "serverPort": 8080,
   "proxyPort": 3456,
   "idleTimeoutMinutes": 15,
-  "onExitServer": "ask"
+  "onExitServer": "ask",
+  "routing": {
+    "rules": {
+      "chit_chat": { "tier": 1 },
+      "simple_code": { "tier": 1 },
+      "hard_question": { "tier": 3 },
+      "try_again": { "tier": 1 }
+    },
+    "tiers": {
+      "1": { "target": "local" },
+      "2": { "target": "claude", "claudeModel": "claude-sonnet-4-5-20250929" },
+      "3": { "target": "claude", "claudeModel": "claude-opus-4-6" }
+    },
+    "claudeApiKey": "sk-ant-..."
+  }
 }
 ```
 
@@ -160,9 +228,11 @@ Config is stored at `~/.mallex/config.json`:
 
 | Hardware | Recommended Model | Notes |
 |---|---|---|
-| 16GB RAM | Qwen2.5-Coder-7B-Instruct-4bit | Best quality/speed for limited RAM |
-| 32GB RAM | Qwen2.5-Coder-14B-Instruct-4bit | Good balance |
-| 64GB+ RAM | Qwen2.5-Coder-32B-Instruct-4bit | Best local coding model |
+| 8GB RAM | Qwen2.5-Coder-7B-Instruct-4bit | Basic — pair with Claude for medium/high tasks |
+| 16GB RAM | Qwen2.5-Coder-14B-Instruct-4bit | Good for simple tasks |
+| 32GB RAM | Qwen3-Coder-30B-A3B-Instruct-4bit | Handles most code tasks locally |
+| 64GB RAM | Qwen3-Coder-Next-Instruct-4bit | Benchmarks near Sonnet — handles medium tasks locally |
+| 128GB+ RAM | Qwen3-Coder-Next-Instruct-8bit | Best local quality |
 
 ## Debug
 
