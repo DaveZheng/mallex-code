@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import http from "node:http";
 import { loadConfig, saveConfig } from "./config.js";
-import { getDeviceInfo, recommendModel } from "./device.js";
+import { getDeviceInfo, recommendModel, getAvailableMemoryGB, lookupModelSize } from "./device.js";
 import { ensureDependencies, ensureServer, stopServer } from "./server.js";
 import { startProxy, setShuttingDown } from "./proxy.js";
 import { execFileSync, spawn } from "node:child_process";
@@ -85,7 +85,27 @@ async function main(): Promise<void> {
   }
 
   // Ensure python + mlx-lm are available (creates venv on first run)
-  ensureDependencies();
+  await ensureDependencies();
+
+  // Memory check before loading model
+  const modelSizeGB = lookupModelSize(config.model);
+  if (modelSizeGB !== undefined) {
+    const availableGB = await getAvailableMemoryGB();
+    if (availableGB < modelSizeGB) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((resolve) =>
+        rl.question(
+          `Warning: ${availableGB.toFixed(1)}GB free memory, model needs ~${modelSizeGB}GB. Continue anyway? (Y/n) `,
+          resolve,
+        ),
+      );
+      rl.close();
+      if (answer.toLowerCase() === "n") {
+        console.log("Aborted.");
+        return;
+      }
+    }
+  }
 
   // Ensure mlx-lm.server is running
   await ensureServer(config.model, config.serverPort);

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { getDeviceInfo, recommendModel } from "./device.js";
+import { getDeviceInfo, recommendModel, getAvailableMemoryGB, lookupModelSize, MODEL_TIERS } from "./device.js";
 
 describe("getDeviceInfo", () => {
   it("returns chip and totalMemoryGB on macOS", async () => {
@@ -39,5 +39,49 @@ describe("recommendModel", () => {
     const rec = recommendModel(128);
     assert.ok(rec.modelId.includes("Coder-Next"), `got ${rec.modelId}`);
     assert.strictEqual(rec.quantization, "8bit");
+  });
+});
+
+describe("getAvailableMemoryGB", () => {
+  it("returns a positive number on macOS", async () => {
+    const gb = await getAvailableMemoryGB();
+    assert.ok(typeof gb === "number", "should return a number");
+    assert.ok(gb > 0, `should be positive, got ${gb}`);
+    assert.ok(gb < 512, `should be reasonable (< 512GB), got ${gb}`);
+  });
+});
+
+describe("lookupModelSize", () => {
+  it("returns size for a known model", () => {
+    const size = lookupModelSize("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
+    assert.strictEqual(size, 4);
+  });
+
+  it("returns size for another known model", () => {
+    const size = lookupModelSize("mlx-community/Qwen2.5-Coder-14B-Instruct-4bit");
+    assert.strictEqual(size, 8);
+  });
+
+  it("returns undefined for unknown models", () => {
+    assert.strictEqual(lookupModelSize("some/custom-model"), undefined);
+  });
+
+  it("returns undefined for empty string", () => {
+    assert.strictEqual(lookupModelSize(""), undefined);
+  });
+});
+
+describe("MODEL_TIERS", () => {
+  it("is exported and non-empty", () => {
+    assert.ok(Array.isArray(MODEL_TIERS));
+    assert.ok(MODEL_TIERS.length > 0);
+  });
+
+  it("every tier has required fields", () => {
+    for (const tier of MODEL_TIERS) {
+      assert.ok(typeof tier.modelId === "string");
+      assert.ok(typeof tier.estimatedSizeGB === "number");
+      assert.ok(tier.estimatedSizeGB > 0);
+    }
   });
 });

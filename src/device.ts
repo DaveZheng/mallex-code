@@ -25,7 +25,7 @@ interface ModelTier {
 
 // Actual sizes verified from HuggingFace (2026-02-06)
 // Budget = total RAM × 0.75 (reserve 25% for OS + apps)
-const MODEL_TIERS: ModelTier[] = [
+export const MODEL_TIERS: ModelTier[] = [
   {
     minRAM: 128,
     modelId: "mlx-community/Qwen3-Coder-Next-8bit",
@@ -81,4 +81,40 @@ export function recommendModel(totalMemoryGB: number): ModelRecommendation {
     }
   }
   return MODEL_TIERS[MODEL_TIERS.length - 1];
+}
+
+/**
+ * Parse macOS `vm_stat` output to estimate available memory in GB.
+ * Counts free + inactive + purgeable + speculative pages, which is more
+ * accurate than `os.freemem()` on macOS (which only reports "free" pages).
+ */
+export async function getAvailableMemoryGB(): Promise<number> {
+  const { stdout } = await execFileAsync("vm_stat");
+
+  // First line: "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+  const pageSizeMatch = stdout.match(/page size of (\d+) bytes/);
+  const pageSize = pageSizeMatch ? parseInt(pageSizeMatch[1], 10) : 16384;
+
+  const get = (label: string): number => {
+    const re = new RegExp(`${label}:\\s+(\\d+)`);
+    const m = stdout.match(re);
+    return m ? parseInt(m[1], 10) : 0;
+  };
+
+  const pages =
+    get("Pages free") +
+    get("Pages inactive") +
+    get("Pages purgeable") +
+    get("Pages speculative");
+
+  return (pages * pageSize) / (1024 ** 3);
+}
+
+/**
+ * Look up estimated model size in GB from MODEL_TIERS.
+ * Returns undefined for custom/unknown models.
+ */
+export function lookupModelSize(modelId: string): number | undefined {
+  const tier = MODEL_TIERS.find((t) => t.modelId === modelId);
+  return tier?.estimatedSizeGB;
 }
