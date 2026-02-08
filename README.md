@@ -7,13 +7,13 @@ mallex is a translation proxy that sits between Claude Code and [mlx-lm.server](
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicobailon/mallex-code/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DaveZheng/mallex-code/main/install.sh | bash
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/nicobailon/mallex-code.git
+git clone https://github.com/DaveZheng/mallex-code.git
 cd mallex-code
 npm install && npm run build
 npm link
