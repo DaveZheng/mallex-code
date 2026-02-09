@@ -4,6 +4,7 @@
  */
 
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -12,9 +13,12 @@ import { translateResponse } from "./translate-response.js";
 import { chatCompletion, chatCompletionStream } from "./client.js";
 import { createStreamTranslator } from "./translate-stream.js";
 import { isServerHealthy, isOomCrash, startServer, waitForServer } from "./server.js";
-import { loadConfig, type RoutingConfig } from "./config.js";
+import { loadConfig, type RoutingConfig, type TierModel, type ModelTierNumber } from "./config.js";
 import { extractLatestUserText, classifyIntent, resolveRoute } from "./router.js";
 import { claudeCompletion, claudeCompletionStream, ClaudeApiError } from "./claude-client.js";
+import { getModelTier, CONTEXT_BUDGETS } from "./prompt-trimmer.js";
+
+const debug = !!process.env.MALLEX_DEBUG;
 
 function debugLogRequest(anthropicReq: AnthropicRequest): void {
   try {
@@ -23,6 +27,18 @@ function debugLogRequest(anthropicReq: AnthropicRequest): void {
     fs.writeFileSync(
       path.join(dir, "last-request.json"),
       JSON.stringify(anthropicReq, null, 2),
+    );
+  } catch {
+    // Debug logging should never break the proxy
+  }
+}
+
+function debugLogTranslated(openaiReq: object): void {
+  try {
+    const dir = path.join(os.homedir(), ".mallex");
+    fs.writeFileSync(
+      path.join(dir, "last-translated.json"),
+      JSON.stringify(openaiReq, null, 2),
     );
   } catch {
     // Debug logging should never break the proxy
@@ -38,6 +54,9 @@ class OomError extends Error {
 
 let shuttingDown = false;
 export function setShuttingDown(): void { shuttingDown = true; }
+
+/** Track in-flight local MLX requests so concurrent ones (sub-agents) overflow to Claude. */
+let localInFlight = 0;
 
 function isConnectionError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -63,14 +82,14 @@ async function withAutoRestart<T>(
     if (await isServerHealthy(serverPort)) throw err;
 
     if (isOomCrash()) {
-      console.error("[mallex] mlx-lm server ran out of GPU memory");
+      if (debug) console.error("[mallex] mlx-lm server ran out of GPU memory");
       throw new OomError();
     }
 
-    console.error("[mallex] mlx-lm server crashed, restarting...");
+    if (debug) console.error("[mallex] mlx-lm server crashed, restarting...");
     await startServer(model, serverPort);
     await waitForServer(serverPort);
-    console.error("[mallex] server restarted, retrying request");
+    if (debug) console.error("[mallex] server restarted, retrying request");
 
     return fn();
   }
@@ -92,20 +111,36 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
 
   const server = http.createServer(async (req, res) => {
     const pathname = req.url?.split("?")[0];
+    const routing = getRoutingConfig();
+    const isOAuth = routing?.authMethod === "oauth";
 
-    // Handle token counting — Claude Code calls this to validate the model
-    if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
-      const body = await readBody(req);
-      const parsed = JSON.parse(body);
-      const estimatedTokens = JSON.stringify(parsed.messages ?? []).length / 4;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ input_tokens: Math.ceil(estimatedTokens) }));
-      return;
-    }
-
+    // Only POST /v1/messages is handled locally (when routed to local MLX).
+    // Everything else is relayed to Anthropic (OAuth mode) or returns 404 (API key mode).
     if (req.method !== "POST" || pathname !== "/v1/messages") {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { type: "not_found", message: "Not found" } }));
+      if (isOAuth) {
+        try {
+          const body = await readBody(req);
+          await relayToAnthropic(req, body, res);
+        } catch (err) {
+          if (debug) console.error("[mallex] relay error:", err instanceof Error ? err.message : err);
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { type: "server_error", message: "Failed to relay to Anthropic" } }));
+          }
+        }
+      } else {
+        // API key mode: fake count_tokens, 404 everything else
+        if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+          const body = await readBody(req);
+          const parsed = JSON.parse(body);
+          const estimatedTokens = JSON.stringify(parsed.messages ?? []).length / 4;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ input_tokens: Math.ceil(estimatedTokens) }));
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { type: "not_found", message: "Not found" } }));
+        }
+      }
       return;
     }
 
@@ -115,26 +150,90 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
       debugLogRequest(anthropicReq);
 
       // Route via intent classification if routing is configured
-      const routing = getRoutingConfig();
       if (routing) {
         const route = await routeRequest(anthropicReq, model, serverPort, routing);
-        if (route?.target === "claude" && routing.claudeApiKey) {
+        if (route?.target === "claude") {
           try {
-            await handleClaudeRoute(anthropicReq, routing.claudeApiKey, route.claudeModel, res);
+            if (isOAuth) {
+              // OAuth: relay the exact request to Anthropic
+              await relayToAnthropic(req, body, res);
+            } else if (routing.claudeApiKey) {
+              // API key: use claude-client.ts
+              await handleClaudeRoute(anthropicReq, routing.claudeApiKey, route.claudeModel, res);
+            }
             return;
           } catch (err) {
+            if (isOAuth && !isConnectionError(err)) {
+              // OAuth: pass non-network errors through (401, 429, etc.)
+              throw err;
+            }
             if (err instanceof ClaudeApiError) {
-              console.error(`[mallex] Claude API error (${err.status}), falling back to local`);
+              if (debug) console.error(`[mallex] Claude API error (${err.status}), falling back to local`);
             } else {
-              console.error("[mallex] Claude API error, falling back to local");
+              if (debug) console.error("[mallex] Claude API error, falling back to local");
             }
             // Fall through to local MLX path
           }
         }
       }
 
-      const openaiReq = translateRequest(anthropicReq, model);
+      // Concurrent-request overflow: if the local model is already busy
+      // (e.g. sub-agents from Task tool), route to Claude instead of queuing
+      if (localInFlight > 0 && routing) {
+        const escalation = findEscalationTier(routing.tiers);
+        if (escalation) {
+          if (debug) console.error(`[mallex] local model busy (${localInFlight} in-flight), overflowing to Claude`);
+          try {
+            if (isOAuth) {
+              await relayToAnthropic(req, body, res);
+            } else if (routing.claudeApiKey) {
+              await handleClaudeRoute(anthropicReq, routing.claudeApiKey, escalation.claudeModel, res);
+            }
+            return;
+          } catch (err) {
+            if (debug) console.error("[mallex] overflow failed, falling through to local:", err instanceof Error ? err.message : err);
+            // Fall through to local MLX path
+          }
+        }
+      }
 
+      const openaiReq = translateRequest(anthropicReq, model);
+      debugLogTranslated(openaiReq);
+
+      // Context-overflow detection: escalate to Claude if request exceeds budget
+      const totalChars = openaiReq.messages.reduce((sum, m) => sum + m.content.length, 0);
+      const tier = getModelTier(model);
+      const budget = CONTEXT_BUDGETS[tier];
+
+      if (totalChars > budget && routing) {
+        const overageRatio = totalChars / budget;
+
+        if (overageRatio > 1.2) {
+          // >20% over budget: escalate to Claude
+          const escalation = findEscalationTier(routing.tiers);
+          if (escalation) {
+            if (debug) console.error(`[mallex] context overflow (${totalChars}/${budget} chars, ${(overageRatio * 100).toFixed(0)}%), escalating to Claude`);
+            try {
+              if (isOAuth) {
+                await relayToAnthropic(req, body, res);
+              } else if (routing.claudeApiKey) {
+                await handleClaudeRoute(anthropicReq, routing.claudeApiKey, escalation.claudeModel, res);
+              }
+              return;
+            } catch (err) {
+              if (debug) console.error("[mallex] escalation failed, falling through to local:", err instanceof Error ? err.message : err);
+              // Fall through to local MLX path
+            }
+          } else if (debug) {
+            console.error(`[mallex] context overflow (${totalChars}/${budget} chars) but no Claude tier available`);
+          }
+        } else if (debug) {
+          console.error(`[mallex] context near budget (${totalChars}/${budget} chars, ${(overageRatio * 100).toFixed(0)}%)`);
+        }
+      }
+
+      localInFlight++;
+      try {
       if (anthropicReq.stream) {
         await withAutoRestart(
           () => handleStreaming(openaiReq, model, serverPort, res),
@@ -147,6 +246,9 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
           model,
           serverPort,
         );
+      }
+      } finally {
+        localInFlight--;
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal server error";
@@ -176,6 +278,22 @@ export function startProxy(options: ProxyOptions): Promise<http.Server> {
       resolve(server);
     });
   });
+}
+
+/**
+ * Find the lowest-numbered non-local tier for escalation.
+ * Returns the tier config if a remote tier exists, undefined otherwise.
+ */
+export function findEscalationTier(
+  tiers: Record<ModelTierNumber, TierModel>,
+): { tierNumber: ModelTierNumber; claudeModel: string | undefined } | undefined {
+  for (const num of [1, 2, 3] as ModelTierNumber[]) {
+    const tier = tiers[num];
+    if (tier && tier.target !== "local") {
+      return { tierNumber: num, claudeModel: tier.claudeModel };
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -209,7 +327,9 @@ async function routeRequest(
 
   const intent = await classifyIntent(userText, model, serverPort);
   const route = resolveRoute(intent, routing.rules, routing.tiers);
-  console.error(`[mallex] intent=${route.intent} tier=${route.tier} target=${route.target}`);
+  if (debug) console.error(`[mallex] intent=${route.intent} tier=${route.tier} target=${route.target}`);
+  // Update terminal title so user can see routing in their tab bar
+  process.stderr.write(`\x1b]0;mallex: ${route.intent} → ${route.target}\x07`);
   return route;
 }
 
@@ -239,6 +359,45 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
+  });
+}
+
+/**
+ * Transparently relay an HTTP request to api.anthropic.com.
+ * Copies all headers (replacing host), forwards body, pipes response back.
+ */
+function relayToAnthropic(
+  clientReq: http.IncomingMessage,
+  body: string,
+  clientRes: http.ServerResponse,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const headers: Record<string, string | string[]> = {};
+    for (const [key, value] of Object.entries(clientReq.headers)) {
+      if (key === "host" || key === "connection" || key === "content-length") continue;
+      if (value !== undefined) headers[key] = value;
+    }
+    headers["host"] = "api.anthropic.com";
+    headers["content-length"] = String(Buffer.byteLength(body));
+
+    const apiReq = https.request(
+      {
+        hostname: "api.anthropic.com",
+        port: 443,
+        path: clientReq.url ?? "/",
+        method: clientReq.method ?? "POST",
+        headers,
+      },
+      (apiRes) => {
+        clientRes.writeHead(apiRes.statusCode ?? 500, apiRes.headers);
+        apiRes.pipe(clientRes);
+        apiRes.on("end", () => resolve());
+      },
+    );
+
+    apiReq.on("error", (err) => reject(err));
+    apiReq.write(body);
+    apiReq.end();
   });
 }
 

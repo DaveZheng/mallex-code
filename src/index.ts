@@ -118,9 +118,15 @@ async function main(): Promise<void> {
     routing: config.routing,
   });
 
+  const isOAuth = config.routing?.authMethod === "oauth";
+
   if (proxyOnly) {
     console.log(`\nTo use with Claude Code:`);
-    console.log(`  ANTHROPIC_BASE_URL=http://localhost:${config.proxyPort} ANTHROPIC_AUTH_TOKEN=local claude`);
+    if (isOAuth) {
+      console.log(`  ANTHROPIC_BASE_URL=http://localhost:${config.proxyPort} claude`);
+    } else {
+      console.log(`  ANTHROPIC_BASE_URL=http://localhost:${config.proxyPort} ANTHROPIC_AUTH_TOKEN=local claude`);
+    }
 
     // Override SIGINT in proxy-only mode to show shutdown prompt
     process.removeAllListeners("SIGINT");
@@ -145,14 +151,23 @@ async function main(): Promise<void> {
   }
 
   // Spawn claude with inherited stdio so it takes over the terminal
+  const claudeEnv: Record<string, string | undefined> = {
+    ...process.env,
+    ANTHROPIC_BASE_URL: `http://localhost:${config.proxyPort}`,
+    CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "false",
+  };
+  if (!isOAuth) {
+    claudeEnv.ANTHROPIC_AUTH_TOKEN = "local";
+  }
   const claude = spawn("claude", filteredArgs, {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: `http://localhost:${config.proxyPort}`,
-      ANTHROPIC_AUTH_TOKEN: "local",
-    },
+    env: claudeEnv,
   });
+
+  // Once claude is running, let it handle Ctrl+C. Don't exit the parent
+  // immediately — wait for claude to exit so the shutdown prompt can run.
+  process.removeAllListeners("SIGINT");
+  process.on("SIGINT", () => { /* let claude handle it */ });
 
   claude.on("exit", async (code) => {
     cleanupSync();

@@ -20,18 +20,24 @@ const TOOL_NAME_MAP: Record<string, string> = {
   bash: "Bash",
   glob: "Glob",
   grep: "Grep",
+  web_search: "WebSearch",
+  web_fetch: "WebFetch",
+  ask_user: "AskUserQuestion",
 };
 
 /**
  * Map local parameter names to Claude Code parameter names where they differ.
  */
 const PARAM_NAME_MAP: Record<string, Record<string, string>> = {
-  Read: { file_path: "file_path", offset: "offset", limit: "limit" },
+  Read: { file_path: "file_path", offset: "offset", limit: "limit", pages: "pages" },
   Write: { file_path: "file_path", content: "content" },
-  Edit: { file_path: "file_path", old_string: "old_string", new_string: "new_string" },
-  Bash: { command: "command" },
+  Edit: { file_path: "file_path", old_string: "old_string", new_string: "new_string", replace_all: "replace_all" },
+  Bash: { command: "command", description: "description", timeout: "timeout" },
   Glob: { pattern: "pattern", path: "path" },
-  Grep: { pattern: "pattern", path: "path" },
+  Grep: { pattern: "pattern", path: "path", output_mode: "output_mode", head_limit: "head_limit", offset: "offset", glob: "glob", type: "type", "-i": "-i", "-A": "-A", "-B": "-B", "-C": "-C", context: "context", multiline: "multiline" },
+  WebSearch: { query: "query", allowed_domains: "allowed_domains", blocked_domains: "blocked_domains" },
+  WebFetch: { url: "url", prompt: "prompt" },
+  AskUserQuestion: { question: "question" },
 };
 
 function mapToolCall(name: string, input: Record<string, string>): ParsedToolCall {

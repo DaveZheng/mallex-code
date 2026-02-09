@@ -20,8 +20,8 @@ function makeDeps(answers: string[]): RouterSetupDeps & { logs: string[] } {
 }
 
 describe("runRouterSetupWithDeps", () => {
-  it("accept defaults with small model — tier 2 is claude/sonnet, tier 3 is claude/opus", async () => {
-    const deps = makeDeps(["Y", "sk-ant-test"]);
+  it("accept defaults with small model — tier 2 is claude/sonnet, tier 3 is claude/opus, authMethod is oauth", async () => {
+    const deps = makeDeps(["Y"]);
     const result = await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
 
     assert.strictEqual(result.routing.tiers[1].target, "local");
@@ -30,37 +30,32 @@ describe("runRouterSetupWithDeps", () => {
     assert.strictEqual(result.routing.tiers[3].target, "claude");
     assert.strictEqual(result.routing.tiers[3].claudeModel, "claude-opus-4-6");
     assert.deepStrictEqual(result.routing.rules, DEFAULT_ROUTING_RULES);
-    assert.strictEqual(result.routing.claudeApiKey, "sk-ant-test");
+    assert.strictEqual(result.routing.authMethod, "oauth");
   });
 
   it("accept defaults with powerful model — tier 2 defaults to local", async () => {
-    const deps = makeDeps(["Y", "sk-ant-test"]);
+    const deps = makeDeps(["Y"]);
     const result = await runRouterSetupWithDeps("Qwen3-Coder-Next-8bit", deps);
 
     assert.strictEqual(result.routing.tiers[1].target, "local");
     assert.strictEqual(result.routing.tiers[2].target, "local");
     assert.strictEqual(result.routing.tiers[3].target, "claude");
     assert.strictEqual(result.routing.tiers[3].claudeModel, "claude-opus-4-6");
-    assert.strictEqual(result.routing.claudeApiKey, "sk-ant-test");
+    assert.strictEqual(result.routing.authMethod, "oauth");
   });
 
-  it("accept defaults with no API key — all claude tiers downgraded to local", async () => {
-    const deps = makeDeps(["Y", ""]);
-    const result = await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
-
-    assert.strictEqual(result.routing.tiers[1].target, "local");
-    assert.strictEqual(result.routing.tiers[2].target, "local");
-    assert.strictEqual(result.routing.tiers[3].target, "local");
-    assert.strictEqual(result.routing.claudeApiKey, undefined);
+  it("accept defaults — shows oauth login message when tiers need claude", async () => {
+    const deps = makeDeps(["Y"]);
+    await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
 
     assert.ok(
-      deps.logs.some((l) => l.includes("No API key provided")),
-      "Expected downgrade warning in logs",
+      deps.logs.some((l) => l.includes("Claude Code login")),
+      "Expected OAuth messaging in logs",
     );
   });
 
   it("custom tiers — respects per-tier input", async () => {
-    const deps = makeDeps(["n", "local", "claude-sonnet-4-5-20250929", "claude-opus-4-6", "sk-ant-custom"]);
+    const deps = makeDeps(["n", "local", "claude-sonnet-4-5-20250929", "claude-opus-4-6"]);
     const result = await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
 
     assert.strictEqual(result.routing.tiers[1].target, "local");
@@ -68,43 +63,38 @@ describe("runRouterSetupWithDeps", () => {
     assert.strictEqual(result.routing.tiers[2].claudeModel, "claude-sonnet-4-5-20250929");
     assert.strictEqual(result.routing.tiers[3].target, "claude");
     assert.strictEqual(result.routing.tiers[3].claudeModel, "claude-opus-4-6");
-    assert.strictEqual(result.routing.claudeApiKey, "sk-ant-custom");
+    assert.strictEqual(result.routing.authMethod, "oauth");
   });
 
-  it("custom with 'local' for all tiers — no API key prompt needed", async () => {
+  it("custom with 'local' for all tiers — no oauth needed, authMethod undefined", async () => {
     const deps = makeDeps(["n", "local", "local", "local"]);
     const result = await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
 
     assert.strictEqual(result.routing.tiers[1].target, "local");
     assert.strictEqual(result.routing.tiers[2].target, "local");
     assert.strictEqual(result.routing.tiers[3].target, "local");
-    assert.strictEqual(result.routing.claudeApiKey, undefined);
+    assert.strictEqual(result.routing.authMethod, undefined);
   });
 
-  it("empty input uses defaults", async () => {
-    // Empty accept answer treated as "Y", then empty API key triggers downgrade
-    const deps = makeDeps(["", ""]);
+  it("empty input uses defaults — accepts default tiers, sets oauth", async () => {
+    const deps = makeDeps([""]);
     const result = await runRouterSetupWithDeps("Qwen2.5-Coder-7B-4bit", deps);
 
-    // Defaults for small model: tier 2=claude, tier 3=claude, but no API key → all downgraded
+    // Defaults for small model: tier 2=claude, tier 3=claude
     assert.strictEqual(result.routing.tiers[1].target, "local");
-    assert.strictEqual(result.routing.tiers[2].target, "local");
-    assert.strictEqual(result.routing.tiers[3].target, "local");
-    assert.strictEqual(result.routing.claudeApiKey, undefined);
+    assert.strictEqual(result.routing.tiers[2].target, "claude");
+    assert.strictEqual(result.routing.tiers[3].target, "claude");
+    assert.strictEqual(result.routing.authMethod, "oauth");
   });
 
-  it("powerful model medium defaults to local — only needs API key for tier 3", async () => {
-    const deps = makeDeps(["Y", "sk-ant-powerful"]);
+  it("powerful model medium defaults to local — only tier 3 needs claude", async () => {
+    const deps = makeDeps(["Y"]);
     const result = await runRouterSetupWithDeps("Qwen3-Coder-Next-8bit", deps);
 
-    // Tier 2 is local by default for powerful models
     assert.strictEqual(result.routing.tiers[2].target, "local");
-    // Tier 3 still needs claude
     assert.strictEqual(result.routing.tiers[3].target, "claude");
     assert.strictEqual(result.routing.tiers[3].claudeModel, "claude-opus-4-6");
-    assert.strictEqual(result.routing.claudeApiKey, "sk-ant-powerful");
-
-    // Rules should always be the defaults
+    assert.strictEqual(result.routing.authMethod, "oauth");
     assert.deepStrictEqual(result.routing.rules, DEFAULT_ROUTING_RULES);
   });
 });

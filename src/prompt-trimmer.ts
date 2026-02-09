@@ -34,6 +34,26 @@ import type { AnthropicMessage, AnthropicContentBlock, AnthropicTextBlock } from
 export type ModelTier = "small" | "medium" | "large";
 
 /**
+ * Per-tier context budgets in characters.
+ * Target ~8s prefill on M3 Max class hardware (~3.5 chars/token).
+ */
+export const CONTEXT_BUDGETS: Record<ModelTier, number> = {
+  small: 14_000,   // ~4,000 tokens
+  medium: 7_000,   // ~2,000 tokens
+  large: 100_000,  // Effectively uncapped for local large models
+};
+
+/**
+ * Per-tier max_tokens caps. Claude Code sends max_tokens=32000 which is
+ * excessive for small models — cap to keep generation fast.
+ */
+export const MAX_TOKENS_CAP: Record<ModelTier, number> = {
+  small: 2048,
+  medium: 4096,
+  large: 8192,
+};
+
+/**
  * Extract the parameter count (in billions) from a model ID.
  * Returns null if no size indicator is found.
  *
