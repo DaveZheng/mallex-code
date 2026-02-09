@@ -54,10 +54,13 @@ Claude Code  →  mallex proxy ──────┤   local MLX model
 
 1. **Classifies intent** — uses your local model to classify each request as low, medium, or high effort
 2. **Routes by effort** — sends simple tasks to local MLX, complex tasks to Claude API (configurable per tier)
-3. **Translates requests** from Anthropic Messages API → OpenAI Chat Completions (for local model path)
-4. **Trims prompts** — Claude Code sends ~24K chars of system prompt overhead; mallex trims this to fit the model's practical context budget
-5. **Injects tool definitions** as XML in the system prompt so the local model can use tools (read_file, write_file, edit_file, bash, glob, grep)
-6. **Translates responses** back from OpenAI format → Anthropic format (including streaming)
+3. **Overflows sub-agents** — when Claude Code spawns parallel Task agents, concurrent requests automatically route to Claude instead of queuing behind the local model
+4. **Translates requests** from Anthropic Messages API → OpenAI Chat Completions (for local model path)
+5. **Trims prompts** — Claude Code sends ~24K chars of system prompt overhead; mallex trims this to fit the model's practical context budget
+6. **Injects tool definitions** as XML in the system prompt so the local model can use tools (read_file, write_file, edit_file, bash, glob, grep, web_search, web_fetch, ask_user)
+7. **Translates responses** back from OpenAI format → Anthropic format (including streaming)
+8. **Manages memory** — caps MLX Metal cache, limits server concurrency, auto-restarts on OOM crashes
+9. **Disables prompt suggestions** — Claude Code's autocomplete feature fires a full API request after every response to predict the user's next input; mallex disables this to avoid wasting local model prefill time and preventing misrouted intent classification
 
 ## Intent-Based Routing
 
@@ -106,7 +109,13 @@ On first run, mallex walks you through routing configuration. To reconfigure lat
 mallex --setup
 ```
 
-You only need a Claude API key if any tier is configured to use Claude. If no key is provided, Claude tiers fall back to local MLX.
+Claude tiers use OAuth by default (your existing Claude Code login). You can also provide an API key. If neither is available, Claude tiers fall back to local MLX.
+
+### Prompt suggestions
+
+Claude Code's autocomplete ("prompt suggestion") feature sends a full API request after every assistant response to predict what you'll type next. This doubles request volume to the local model and can confuse the intent classifier — the suggestion prompt gets classified as the "last user message", potentially escalating a simple question to Claude.
+
+mallex disables this by spawning Claude Code with `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false`.
 
 ## Prompt Trimming
 
@@ -164,7 +173,7 @@ mallex trims at two levels, applied during request translation before forwarding
 
 Unrecognized `<system-reminder>` blocks are unwrapped (tags stripped, content kept) rather than dropped, so new Claude Code features degrade gracefully.
 
-**3. Tool injection** — Claude Code's 22 JSON tool schemas are dropped entirely. mallex injects its own 6 tools as XML in the system prompt, using a format local models can parse:
+**3. Tool injection** — Claude Code's 22 JSON tool schemas are dropped entirely. mallex injects its own 9 tools as XML in the system prompt, using a format local models can parse:
 
 ```xml
 <tool name="read_file">
@@ -219,10 +228,13 @@ Config is stored at `~/.mallex/config.json`:
       "2": { "target": "claude", "claudeModel": "claude-sonnet-4-5-20250929" },
       "3": { "target": "claude", "claudeModel": "claude-opus-4-6" }
     },
+    "authMethod": "oauth",
     "claudeApiKey": "sk-ant-..."
   }
 }
 ```
+
+Authentication for Claude tiers uses OAuth by default (shares your Claude Code login). Set `authMethod` to `"apikey"` and provide `claudeApiKey` to use an API key instead.
 
 ## Recommended Models
 
@@ -234,10 +246,22 @@ Config is stored at `~/.mallex/config.json`:
 | 64GB RAM | Qwen3-Coder-Next-Instruct-4bit | Benchmarks near Sonnet — handles medium tasks locally |
 | 128GB+ RAM | Qwen3-Coder-Next-Instruct-8bit | Best local quality |
 
+## Memory Management
+
+mlx-lm.server's defaults will happily consume all your RAM. mallex applies three safeguards:
+
+1. **Metal cache limit** — MLX defaults to caching ~95% of device RAM worth of Metal buffers. mallex sets `mx.set_cache_limit()` to 25% of the device's recommended working set (capped at 4GB), leaving room for model weights and the OS.
+
+2. **Concurrency = 1** — mlx-lm.server defaults to processing 8 prompts and 32 decodes in parallel, each with its own KV cache. mallex sets both to 1 since it's a single-user proxy.
+
+3. **Sub-agent overflow** — Claude Code can spawn parallel Task agents (for codebase exploration, etc.), each making concurrent API requests. When the local model is already busy, mallex automatically routes overflow requests to the first non-local tier (e.g. Sonnet) instead of queuing them behind the 7B model.
+
 ## Debug
 
 - Last raw request from Claude Code: `~/.mallex/last-request.json`
-- mlx-lm.server logs: `~/.mallex/server.log`
+- Last translated request sent to MLX: `~/.mallex/last-translated.json`
+- Current server log: `~/.mallex/server.log`
+- Previous server log (crash evidence): `~/.mallex/server.prev.log`
 
 ## License
 

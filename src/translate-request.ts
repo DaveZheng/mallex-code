@@ -3,7 +3,7 @@
  */
 
 import { injectToolDefinitions } from "./prompt.js";
-import { trimSystemPrompt, trimMessages } from "./prompt-trimmer.js";
+import { trimSystemPrompt, trimMessages, getModelTier, CONTEXT_BUDGETS, MAX_TOKENS_CAP } from "./prompt-trimmer.js";
 import type { OpenAIChatRequest } from "./client.js";
 
 /** Anthropic content block types */
@@ -58,9 +58,20 @@ function toolUseToXml(block: AnthropicToolUseBlock): string {
 }
 
 /**
- * Flatten an Anthropic content block array into a plain text string.
+ * Truncate a tool result string to fit within a character budget.
+ * Adds metadata header so the model knows content was truncated.
  */
-function flattenContent(content: string | AnthropicContentBlock[], role: "user" | "assistant"): string {
+export function truncateToolResult(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const truncated = text.slice(0, maxChars);
+  return `(truncated: showing ${maxChars.toLocaleString()} of ${text.length.toLocaleString()} chars)\n${truncated}\n...(${(text.length - maxChars).toLocaleString()} chars omitted)`;
+}
+
+/**
+ * Flatten an Anthropic content block array into a plain text string.
+ * When toolResultBudget is set, tool result blocks exceeding it are truncated.
+ */
+function flattenContent(content: string | AnthropicContentBlock[], role: "user" | "assistant", toolResultBudget?: number): string {
   if (typeof content === "string") return content;
 
   const parts: string[] = [];
@@ -70,9 +81,12 @@ function flattenContent(content: string | AnthropicContentBlock[], role: "user" 
     } else if (block.type === "tool_use") {
       parts.push(toolUseToXml(block));
     } else if (block.type === "tool_result") {
-      const resultText = typeof block.content === "string"
+      let resultText = typeof block.content === "string"
         ? block.content
         : block.content.map((b) => b.text).join("\n");
+      if (toolResultBudget !== undefined) {
+        resultText = truncateToolResult(resultText, toolResultBudget);
+      }
       parts.push(`Tool result for ${block.tool_use_id}:\n${resultText}`);
     }
   }
@@ -92,10 +106,17 @@ function extractSystemPrompt(system: AnthropicRequest["system"]): string {
  * Translate an Anthropic Messages API request to an OpenAI Chat Completions request.
  */
 export function translateRequest(req: AnthropicRequest, mlxModel: string): OpenAIChatRequest {
+  const tier = getModelTier(mlxModel);
+
   // Build system prompt: trim for model size, then inject tool definitions
   let systemPrompt = extractSystemPrompt(req.system);
   systemPrompt = trimSystemPrompt(systemPrompt, mlxModel);
   systemPrompt = injectToolDefinitions(systemPrompt);
+
+  // Calculate per-tool-result budget: 40% of remaining context after system prompt
+  const budget = CONTEXT_BUDGETS[tier];
+  const remaining = Math.max(0, budget - systemPrompt.length);
+  const toolResultBudget = Math.floor(remaining * 0.4);
 
   // Trim infrastructure noise from user messages, then convert
   const trimmedMsgs = trimMessages(req.messages);
@@ -105,16 +126,19 @@ export function translateRequest(req: AnthropicRequest, mlxModel: string): OpenA
   ];
 
   for (const msg of trimmedMsgs) {
-    const content = flattenContent(msg.content, msg.role);
+    const content = flattenContent(msg.content, msg.role, toolResultBudget);
     if (content) {
       messages.push({ role: msg.role, content });
     }
   }
 
+  // Cap max_tokens based on model tier
+  const maxTokens = Math.min(req.max_tokens || 4096, MAX_TOKENS_CAP[tier]);
+
   return {
     model: mlxModel,
     messages,
-    max_tokens: req.max_tokens || 4096,
+    max_tokens: maxTokens,
     temperature: 0.7,
     top_p: 0.95,
     stream: req.stream,

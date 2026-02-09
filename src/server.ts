@@ -8,6 +8,8 @@ import { Spinner } from "./spinner.js";
 const MALLEX_DIR = path.join(os.homedir(), ".mallex");
 const PID_FILE = path.join(MALLEX_DIR, "server.pid");
 const LOG_FILE = path.join(MALLEX_DIR, "server.log");
+const PREV_LOG_FILE = path.join(MALLEX_DIR, "server.prev.log");
+const MAX_LOG_BYTES = 512 * 1024; // 512KB
 const VENV_PYTHON = path.join(MALLEX_DIR, "venv", "bin", "python3");
 
 const VENV_DIR = path.join(MALLEX_DIR, "venv");
@@ -278,8 +280,42 @@ export async function ensureDependencies(): Promise<void> {
   }
 }
 
+/**
+ * Write a Python wrapper that dynamically sets the MLX Metal cache limit
+ * before starting the server. mlx-lm.server doesn't expose a cache limit
+ * CLI flag, and the MLX default (~95% of device RAM) causes runaway growth.
+ *
+ * The wrapper computes: min(25% of max_recommended_working_set_size, 4GB),
+ * floored at 256MB. This scales with the device while leaving headroom
+ * for model weights and the OS.
+ */
+function ensureServerWrapper(): string {
+  const wrapperPath = path.join(MALLEX_DIR, "server_wrapper.py");
+  const script = `\
+import mlx.core as mx
+
+info = mx.device_info()
+wss = info["max_recommended_working_set_size"]
+cache_limit = min(max(wss // 4, 256 * 1024**2), 4 * 1024**3)
+mx.set_cache_limit(cache_limit)
+
+from mlx_lm.server import main
+main()
+`;
+  fs.mkdirSync(MALLEX_DIR, { recursive: true });
+  fs.writeFileSync(wrapperPath, script);
+  return wrapperPath;
+}
+
 export function buildServerArgs(model: string, port: number): string[] {
-  return ["-m", "mlx_lm.server", "--model", model, "--port", String(port)];
+  const wrapper = ensureServerWrapper();
+  return [
+    wrapper,
+    "--model", model,
+    "--port", String(port),
+    "--prompt-concurrency", "1",
+    "--decode-concurrency", "1",
+  ];
 }
 
 export function parseServerPid(content: string): number | null {
@@ -298,10 +334,35 @@ export async function isServerHealthy(port: number): Promise<boolean> {
   }
 }
 
+/**
+ * Rotate the server log: keep the tail of the previous log as server.prev.log
+ * (capped at MAX_LOG_BYTES) so crash evidence survives restarts.
+ */
+function rotateLog(): void {
+  try {
+    const stat = fs.statSync(LOG_FILE);
+    if (stat.size > 0) {
+      if (stat.size <= MAX_LOG_BYTES) {
+        fs.copyFileSync(LOG_FILE, PREV_LOG_FILE);
+      } else {
+        // Keep only the last MAX_LOG_BYTES
+        const fd = openSync(LOG_FILE, "r");
+        const buf = Buffer.alloc(MAX_LOG_BYTES);
+        readSync(fd, buf, 0, MAX_LOG_BYTES, stat.size - MAX_LOG_BYTES);
+        closeSync(fd);
+        fs.writeFileSync(PREV_LOG_FILE, buf);
+      }
+    }
+  } catch {
+    // Missing log is fine
+  }
+}
+
 export async function startServer(model: string, port: number): Promise<number> {
   const args = buildServerArgs(model, port);
   const pythonPath = getPythonPath();
   fs.mkdirSync(MALLEX_DIR, { recursive: true });
+  rotateLog();
   const logFd = openSync(LOG_FILE, "w");
   const child = spawn(pythonPath, args, {
     detached: true,
@@ -432,9 +493,17 @@ export async function waitForServer(
 export async function ensureServer(model: string, port: number): Promise<void> {
   if (await isServerHealthy(port)) return;
 
+  // A previous session left the server running (e.g. user chose "keep alive").
+  // Don't spawn a duplicate — just wait for the existing process.
+  const existingPid = getRunningServerPid();
+
   const spinner = new Spinner();
-  spinner.start("Starting MLX server...");
-  await startServer(model, port);
+  if (existingPid) {
+    spinner.start("Waiting for existing MLX server...");
+  } else {
+    spinner.start("Starting MLX server...");
+    await startServer(model, port);
+  }
 
   await waitForServer(port, {
     callbacks: {
@@ -479,6 +548,24 @@ export function isOomCrash(): boolean {
     return OOM_PATTERNS.some((p) => tail.includes(p));
   } catch {
     return false;
+  }
+}
+
+/**
+ * Check if a server process from a previous session is still alive.
+ * Returns the PID if the process exists, null otherwise.
+ */
+export function getRunningServerPid(): number | null {
+  if (!fs.existsSync(PID_FILE)) return null;
+  const pid = parseServerPid(fs.readFileSync(PID_FILE, "utf-8"));
+  if (!pid) return null;
+  try {
+    process.kill(pid, 0); // signal 0 = existence check, doesn't kill
+    return pid;
+  } catch {
+    // Process doesn't exist — stale PID file
+    fs.unlinkSync(PID_FILE);
+    return null;
   }
 }
 

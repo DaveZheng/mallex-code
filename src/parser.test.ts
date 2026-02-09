@@ -189,4 +189,42 @@ line three</parameter>
     const result = parseToolCalls(output);
     assert.strictEqual(result.toolCalls[0].name, "custom_tool");
   });
+
+  it("maps web_search to WebSearch", () => {
+    const output = `<tool_call>
+<function=web_search>
+<parameter=query>TypeScript generics</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "WebSearch");
+    assert.strictEqual(result.toolCalls[0].input.query, "TypeScript generics");
+  });
+
+  it("maps web_fetch to WebFetch", () => {
+    const output = `<tool_call>
+<function=web_fetch>
+<parameter=url>https://example.com</parameter>
+<parameter=prompt>Extract the main content</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "WebFetch");
+    assert.strictEqual(result.toolCalls[0].input.url, "https://example.com");
+    assert.strictEqual(result.toolCalls[0].input.prompt, "Extract the main content");
+  });
+
+  it("maps ask_user to AskUserQuestion", () => {
+    const output = `<tool_call>
+<function=ask_user>
+<parameter=question>Which database should I use?</parameter>
+</function>
+</tool_call>`;
+
+    const result = parseToolCalls(output);
+    assert.strictEqual(result.toolCalls[0].name, "AskUserQuestion");
+    assert.strictEqual(result.toolCalls[0].input.question, "Which database should I use?");
+  });
 });

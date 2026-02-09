@@ -14,13 +14,18 @@ import {
 import type { ServerPhase, WaitOptions } from "./server.js";
 
 describe("buildServerArgs", () => {
-  it("builds correct mlx_lm.server command args", () => {
+  it("uses wrapper script with concurrency limits", () => {
     const args = buildServerArgs("mlx-community/test-model", 8080);
-    assert.deepStrictEqual(args, [
-      "-m", "mlx_lm.server",
+    assert.ok(args[0].endsWith("server_wrapper.py"), "should use wrapper script");
+    assert.deepStrictEqual(args.slice(1), [
       "--model", "mlx-community/test-model",
       "--port", "8080",
+      "--prompt-concurrency", "1",
+      "--decode-concurrency", "1",
     ]);
+    // Wrapper script should exist and set cache limit
+    const wrapper = fs.readFileSync(args[0], "utf-8");
+    assert.ok(wrapper.includes("set_cache_limit"), "wrapper should set cache limit");
   });
 });
 

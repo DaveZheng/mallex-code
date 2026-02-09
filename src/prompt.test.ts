@@ -11,6 +11,9 @@ describe("buildToolInjection", () => {
     assert.ok(injection.includes('<tool name="bash">'), "should include bash tool");
     assert.ok(injection.includes('<tool name="glob">'), "should include glob tool");
     assert.ok(injection.includes('<tool name="grep">'), "should include grep tool");
+    assert.ok(injection.includes('<tool name="web_search">'), "should include web_search tool");
+    assert.ok(injection.includes('<tool name="web_fetch">'), "should include web_fetch tool");
+    assert.ok(injection.includes('<tool name="ask_user">'), "should include ask_user tool");
   });
 
   it("includes tool_call format instructions", () => {
@@ -24,6 +27,19 @@ describe("buildToolInjection", () => {
     const injection = buildToolInjection();
     assert.ok(injection.includes("<tools>"));
     assert.ok(injection.includes("</tools>"));
+  });
+
+  it("includes EFFICIENT TOOL USE guidance", () => {
+    const injection = buildToolInjection();
+    assert.ok(injection.includes("EFFICIENT TOOL USE:"), "should include efficiency section");
+    assert.ok(injection.includes('output_mode="count"'), "should mention count output mode");
+    assert.ok(injection.includes("head_limit"), "should mention head_limit");
+    assert.ok(injection.includes("30000 chars"), "should mention truncation limit");
+  });
+
+  it("includes enum attribute for grep output_mode", () => {
+    const injection = buildToolInjection();
+    assert.ok(injection.includes('enum="content,files_with_matches,count"'), "should include enum values");
   });
 });
 

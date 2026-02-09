@@ -82,25 +82,19 @@ export async function runRouterSetupWithDeps(
     }
   }
 
-  let claudeApiKey: string | undefined;
-
-  const needsApiKey = Object.values(tiers).some((t) => t.target === "claude");
-  if (needsApiKey) {
-    const keyAnswer = await deps.promptUser("Claude API key (sk-ant-...): ");
-    const key = keyAnswer.trim();
-    if (key) {
-      claudeApiKey = key;
-    } else {
-      deps.log("No API key provided — all Claude tiers will fall back to local");
-      for (const tierNum of [1, 2, 3] as ModelTierNumber[]) {
-        if (tiers[tierNum].target === "claude") {
-          tiers[tierNum] = { target: "local" };
-        }
-      }
-    }
+  const needsClaude = Object.values(tiers).some((t) => t.target === "claude");
+  if (needsClaude) {
+    deps.log("Claude escalation will use your Claude Code login (Pro/Max).");
+    deps.log("Make sure you're logged into Claude Code first (just run 'claude' once).");
   }
 
-  return { routing: { rules: DEFAULT_ROUTING_RULES, tiers, claudeApiKey } };
+  return {
+    routing: {
+      rules: DEFAULT_ROUTING_RULES,
+      tiers,
+      authMethod: needsClaude ? "oauth" : undefined,
+    },
+  };
 }
 
 export async function runRouterSetup(localModel: string): Promise<RouterSetupResult> {

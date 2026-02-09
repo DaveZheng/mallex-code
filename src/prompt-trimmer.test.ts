@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { parseModelSize, getModelTier, trimSystemPrompt, trimMessages } from "./prompt-trimmer.js";
+import { parseModelSize, getModelTier, trimSystemPrompt, trimMessages, CONTEXT_BUDGETS, MAX_TOKENS_CAP } from "./prompt-trimmer.js";
 import type { AnthropicMessage } from "./translate-request.js";
 
 // Realistic mock of Claude Code's system prompt (abbreviated but structurally accurate)
@@ -531,6 +531,21 @@ Whenever you read a file, you should consider whether it would be considered mal
     assert.strictEqual(result[0].content, "");
   });
 
+  it("drops system-reminder blocks with only whitespace inner content", () => {
+    // After stripping tags, if the inner content is empty, the block should not appear
+    const messages: AnthropicMessage[] = [{
+      role: "user",
+      content: [
+        { type: "text", text: "<system-reminder>\n  \n</system-reminder>" },
+        { type: "text", text: "hello" },
+      ],
+    }];
+    const result = trimMessages(messages);
+    const blocks = result[0].content as { type: string; text: string }[];
+    assert.strictEqual(blocks.length, 1);
+    assert.strictEqual(blocks[0].text, "hello");
+  });
+
   it("unwraps unrecognized system-reminder blocks instead of dropping", () => {
     const messages: AnthropicMessage[] = [{
       role: "user",
@@ -547,5 +562,31 @@ Whenever you read a file, you should consider whether it would be considered mal
     assert.strictEqual(blocks.length, 2);
     assert.ok(!blocks[0].text.includes("<system-reminder>"), "should strip tags");
     assert.ok(blocks[0].text.includes("Some unknown but potentially useful context"), "should keep inner content");
+  });
+});
+
+describe("CONTEXT_BUDGETS", () => {
+  it("has budgets for all tiers", () => {
+    assert.strictEqual(typeof CONTEXT_BUDGETS.small, "number");
+    assert.strictEqual(typeof CONTEXT_BUDGETS.medium, "number");
+    assert.strictEqual(typeof CONTEXT_BUDGETS.large, "number");
+  });
+
+  it("small < medium < large", () => {
+    assert.ok(CONTEXT_BUDGETS.small > CONTEXT_BUDGETS.medium, "small budget should be > medium (small models get more chars)");
+    assert.ok(CONTEXT_BUDGETS.large > CONTEXT_BUDGETS.small, "large should be > small");
+  });
+});
+
+describe("MAX_TOKENS_CAP", () => {
+  it("has caps for all tiers", () => {
+    assert.strictEqual(MAX_TOKENS_CAP.small, 2048);
+    assert.strictEqual(MAX_TOKENS_CAP.medium, 4096);
+    assert.strictEqual(MAX_TOKENS_CAP.large, 8192);
+  });
+
+  it("small < medium < large", () => {
+    assert.ok(MAX_TOKENS_CAP.small < MAX_TOKENS_CAP.medium);
+    assert.ok(MAX_TOKENS_CAP.medium < MAX_TOKENS_CAP.large);
   });
 });

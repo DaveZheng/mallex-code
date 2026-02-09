@@ -67,10 +67,14 @@ function showPrompt(): Promise<string> {
   });
 
   return new Promise<string>((resolve) => {
-    rl.on("close", () => resolve("1"));
+    let answered = false;
+    rl.on("close", () => {
+      if (!answered) resolve("1");
+    });
     rl.question("Choose [1-4] (default: 1): ", (answer) => {
-      rl.close();
+      answered = true;
       resolve(answer);
+      rl.close();
     });
   });
 }

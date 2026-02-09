@@ -18,6 +18,7 @@ export interface RoutingConfig {
   rules: Record<IntentCategory, RoutingRule>;
   tiers: Record<ModelTierNumber, TierModel>;
   claudeApiKey?: string;
+  authMethod?: "apikey" | "oauth";
 }
 
 export const DEFAULT_ROUTING_RULES: Record<IntentCategory, RoutingRule> = {
